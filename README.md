@@ -3,6 +3,7 @@
 > Discover GitHub's top repositories of the day — with real star velocity.
 
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org)
+[![Tests](https://github.com/alisadeghiaghili/daily-github-pulse/actions/workflows/tests.yml/badge.svg)](https://github.com/alisadeghiaghili/daily-github-pulse/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ---
@@ -210,7 +211,43 @@ CLI args
 
 ---
 
-## Running Tests
+## CI / Continuous Integration
+
+Every push and pull request to `main` automatically runs the full test suite across **Python 3.9 – 3.14** via GitHub Actions.
+
+```
+push / PR to main
+        │
+        ▼
+  test matrix (6 parallel jobs)
+   ├─ Python 3.9
+   ├─ Python 3.10
+   ├─ Python 3.11
+   ├─ Python 3.12
+   ├─ Python 3.13
+   └─ Python 3.14
+        │
+        ▼
+  notify job
+   └─ Telegram message  (✅ passed / ❌ failed)
+      — skipped silently if secrets not configured
+```
+
+### Telegram Notifications (optional)
+
+To receive a Telegram message after each CI run, add two secrets to your repository:
+**Settings → Secrets and variables → Actions → New repository secret**
+
+| Secret | Value |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Token from [@BotFather](https://t.me/BotFather) |
+| `TELEGRAM_CHAT_ID` | ID of the chat/channel to notify |
+
+If the secrets are not set, the notify step is skipped silently — no errors.
+
+---
+
+## Running Tests Locally
 
 ```bash
 pip install pytest
@@ -233,9 +270,9 @@ All tests mock the GitHub API — no network access or token required.
 ## Roadmap Ideas
 
 - [ ] `--format table` — tabular terminal output using `rich`
-- [ ] GitHub Actions workflow for daily digest
+- [ ] Scheduled GitHub Actions for daily digest
 - [ ] Multi-day velocity tracking (7-day moving average)
-- [ ] Webhook / Slack notification integration
+- [ ] Slack / webhook notification integration
 
 ---
 

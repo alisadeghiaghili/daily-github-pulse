@@ -10,6 +10,23 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.1] - 2026-06-01
+
+### Added
+- **GitHub Actions CI workflow** (`.github/workflows/tests.yml`) —
+  runs `pytest` automatically on every push and pull request to `main`
+  across a matrix of **Python 3.9, 3.10, 3.11, 3.12, 3.13, 3.14**
+  (`fail-fast: false` so all versions are always reported).
+- **Telegram notification** — a `notify` job runs after the test matrix
+  and sends a ✅/❌ message with branch, commit, actor, and a direct link
+  to the Actions run. Triggered only when `TELEGRAM_BOT_TOKEN` and
+  `TELEGRAM_CHAT_ID` secrets are configured; skips silently otherwise.
+- **CI badge** added to `README.md` header.
+- **CI section** added to `README.md` explaining the pipeline and
+  Telegram secret setup.
+
+---
+
 ## [1.4.0] - 2026-06-01
 
 ### Added
