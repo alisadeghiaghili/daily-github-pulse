@@ -91,6 +91,57 @@ class TestGetHeaders:
 
 
 # ──────────────────────────────────────────────
+# resolve_period
+# ──────────────────────────────────────────────
+
+class TestResolvePeriod:
+    def test_day_returns_1(self):
+        assert m.resolve_period("day", 99) == 1
+
+    def test_week_returns_7(self):
+        assert m.resolve_period("week", 99) == 7
+
+    def test_month_returns_30(self):
+        assert m.resolve_period("month", 99) == 30
+
+    def test_none_returns_days_argument(self):
+        assert m.resolve_period(None, 14) == 14
+
+    def test_none_returns_default_days(self):
+        assert m.resolve_period(None, 1) == 1
+
+    def test_period_takes_precedence_over_days(self):
+        # Even if --days 999 was passed, --period week wins
+        assert m.resolve_period("week", 999) == 7
+
+    def test_case_insensitive_upper(self):
+        assert m.resolve_period("WEEK", 1) == 7
+
+    def test_case_insensitive_mixed(self):
+        assert m.resolve_period("Month", 1) == 30
+
+    def test_whitespace_stripped(self):
+        assert m.resolve_period("  day  ", 1) == 1
+
+    def test_invalid_period_raises_value_error(self):
+        with pytest.raises(ValueError, match="Unknown period"):
+            m.resolve_period("yesterday", 1)
+
+    def test_invalid_period_message_lists_valid_options(self):
+        with pytest.raises(ValueError) as exc_info:
+            m.resolve_period("quarterly", 1)
+        msg = str(exc_info.value)
+        assert "day" in msg
+        assert "week" in msg
+        assert "month" in msg
+
+    def test_all_valid_period_tokens(self):
+        expected = {"day": 1, "week": 7, "month": 30}
+        for period, days in expected.items():
+            assert m.resolve_period(period, 0) == days
+
+
+# ──────────────────────────────────────────────
 # load_snapshots
 # ──────────────────────────────────────────────
 
@@ -127,7 +178,6 @@ class TestSaveSnapshots:
         assert data["owner/repo"]["stars"] == 12542
 
     def test_merges_with_existing_data(self, tmp_snapshot_file, sample_snapshots):
-        # Write a pre-existing snapshot for a different repo
         existing = {"other/repo": {"stars": 999, "saved_at": "2026-01-01T00:00:00"}}
         tmp_snapshot_file.parent.mkdir(parents=True, exist_ok=True)
         tmp_snapshot_file.write_text(json.dumps(existing), encoding="utf-8")
@@ -139,14 +189,11 @@ class TestSaveSnapshots:
         m.save_snapshots({"New Today": [new_repo]})
         data = json.loads(tmp_snapshot_file.read_text())
 
-        # Both old and new entries should be present
         assert "other/repo" in data
         assert "owner/new" in data
 
     def test_overwrites_existing_entry_for_same_repo(self, tmp_snapshot_file, sample_repo):
-        # Save once
         m.save_snapshots({"New Today": [sample_repo]})
-        # Update star count and save again
         updated = {**sample_repo, "stargazers_count": 99999}
         m.save_snapshots({"Active Giants": [updated]})
         data = json.loads(tmp_snapshot_file.read_text())
@@ -162,7 +209,6 @@ class TestStarDelta:
         assert m.star_delta(sample_repo, {}) is None
 
     def test_positive_delta(self, sample_repo, sample_snapshots):
-        # current: 12542, previous: 12400
         assert m.star_delta(sample_repo, sample_snapshots) == 142
 
     def test_zero_delta(self, sample_repo, sample_snapshots):
@@ -246,7 +292,6 @@ class TestFormatRepo:
     def test_description_truncated_to_80_chars(self, sample_repo):
         sample_repo["description"] = "x" * 120
         output = m.format_repo(sample_repo, 1, {})
-        # The description line should contain exactly 80 x's
         assert "x" * 80 in output
         assert "x" * 81 not in output
 
@@ -275,8 +320,6 @@ class TestSearchTrendingRepos:
         with patch("github_repo_of_the_day.requests.get") as mock_get:
             mock_get.return_value = _mock_response([sample_repo])
             result = m.search_trending_repos()
-        # The same repo (id=1) is returned by both API calls.
-        # It must appear in exactly one category.
         all_ids = [
             repo["id"]
             for repos in result.values()
@@ -288,7 +331,6 @@ class TestSearchTrendingRepos:
         with patch("github_repo_of_the_day.requests.get") as mock_get:
             mock_get.return_value = _mock_response([sample_repo])
             m.search_trending_repos(language="python")
-        # Both calls should include language:python in the query string
         for call in mock_get.call_args_list:
             q = call.kwargs["params"]["q"]
             assert "language:python" in q

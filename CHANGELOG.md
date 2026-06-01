@@ -10,6 +10,25 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.0] - 2026-06-01
+
+### Added
+- **`--period` / `-p`** flag — named look-back window shortcut:
+  `day` (1 day), `week` (7 days), `month` (30 days).
+  Takes precedence over `--days` when both are supplied.
+- `resolve_period()` — pure function mapping period token → days integer.
+  Case-insensitive, strips leading/trailing whitespace, raises `ValueError`
+  for unknown tokens with a descriptive message listing valid options.
+- `PERIOD_DAYS` constant — single source of truth mapping
+  `{"day": 1, "week": 7, "month": 30}`.
+- `--days` help text updated to note it is ignored when `--period` is used.
+
+### Tests
+- `TestResolvePeriod` — 12 new tests covering all tokens, case-insensitivity,
+  whitespace handling, precedence over `--days`, and invalid token errors.
+
+---
+
 ## [1.3.0] - 2026-06-01
 
 ### Added

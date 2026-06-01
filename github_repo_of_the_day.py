@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-daily-github-pulse  v1.3.0
+daily-github-pulse  v1.4.0
 ──────────────────────────
 Discover GitHub's top repositories of the day — with real star velocity.
 
@@ -40,13 +40,20 @@ except ImportError:
     pass  # python-dotenv is optional
 
 # ──────────────────────────────────────────────
-Constants
+# Constants
 # ──────────────────────────────────────────────
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 SNAPSHOT_DIR = Path.home() / ".daily-github-pulse"
 SNAPSHOT_FILE = SNAPSHOT_DIR / "snapshots.json"
 
 GITHUB_TOKEN: str | None = os.getenv("GITHUB_TOKEN")
+
+# Named period shortcuts → number of days
+PERIOD_DAYS: dict[str, int] = {
+    "day":   1,
+    "week":  7,
+    "month": 30,
+}
 
 # Fields included in JSON / CSV exports (in order)
 EXPORT_FIELDS = [
@@ -65,7 +72,7 @@ EXPORT_FIELDS = [
 
 
 # ──────────────────────────────────────────────
-GitHub API helpers
+# GitHub API helpers
 # ──────────────────────────────────────────────
 def get_headers() -> dict:
     """Build HTTP headers for the GitHub REST API."""
@@ -76,7 +83,47 @@ def get_headers() -> dict:
 
 
 # ──────────────────────────────────────────────
-Snapshot helpers
+# Period helpers
+# ──────────────────────────────────────────────
+def resolve_period(period: str | None, days: int) -> int:
+    """
+    Resolve the effective look-back window in days.
+
+    ``--period`` takes precedence over ``--days`` when both are supplied.
+    Valid period tokens are ``day`` (1), ``week`` (7), and ``month`` (30).
+
+    Args:
+        period: Named period string (``"day"``, ``"week"``, ``"month"``),
+                or ``None`` when ``--period`` was not used.
+        days:   Numeric fallback from ``--days`` (default: 1).
+
+    Returns:
+        Resolved number of look-back days.
+
+    Raises:
+        ValueError: If ``period`` is not a recognised token.
+
+    Examples:
+        >>> resolve_period("week", 1)
+        7
+        >>> resolve_period(None, 3)
+        3
+        >>> resolve_period("month", 99)
+        30
+    """
+    if period is None:
+        return days
+    key = period.strip().lower()
+    if key not in PERIOD_DAYS:
+        raise ValueError(
+            f"Unknown period '{period}'. Valid options: "
+            + ", ".join(PERIOD_DAYS)
+        )
+    return PERIOD_DAYS[key]
+
+
+# ──────────────────────────────────────────────
+# Snapshot helpers
 # ──────────────────────────────────────────────
 def load_snapshots() -> dict:
     """
@@ -141,7 +188,7 @@ def star_delta(repo: dict, snapshots: dict) -> int | None:
 
 
 # ──────────────────────────────────────────────
-Core search
+# Core search
 # ──────────────────────────────────────────────
 def search_trending_repos(
     language: str | None = None,
@@ -208,7 +255,7 @@ def search_trending_repos(
 
 
 # ──────────────────────────────────────────────
-Export helpers
+# Export helpers
 # ──────────────────────────────────────────────
 def build_export_row(repo: dict, rank: int, category: str, snapshots: dict) -> dict:
     """
@@ -305,7 +352,7 @@ def write_output(content: str, output_file: str | None, fmt: str) -> None:
 
 
 # ──────────────────────────────────────────────
-Text formatting (human-readable)
+# Text formatting (human-readable)
 # ──────────────────────────────────────────────
 def format_velocity(delta: int | None) -> str:
     """
@@ -352,7 +399,7 @@ def format_repo(repo: dict, rank: int, snapshots: dict) -> str:
 
 
 # ──────────────────────────────────────────────
-Entry point
+# Entry point
 # ──────────────────────────────────────────────
 def find_repo_of_the_day(
     language: str | None = None,
@@ -464,7 +511,7 @@ def find_repo_of_the_day(
 
 
 # ──────────────────────────────────────────────
-CLI
+# CLI
 # ──────────────────────────────────────────────
 if __name__ == "__main__":
     import argparse
@@ -477,6 +524,13 @@ if __name__ == "__main__":
 Examples:
   # Default: today's top repos, all languages
   python github_repo_of_the_day.py
+
+  # Named period shortcut (day / week / month)
+  python github_repo_of_the_day.py --period week
+  python github_repo_of_the_day.py --period month --language rust
+
+  # Numeric fallback (--days still works)
+  python github_repo_of_the_day.py --days 14
 
   # Top Python repos
   python github_repo_of_the_day.py --language python
@@ -511,8 +565,16 @@ Token setup:
 
     parser.add_argument("--language", "-l", metavar="LANG",
                         help="Filter by language (e.g. python, go, rust)")
+    parser.add_argument(
+        "--period", "-p",
+        choices=["day", "week", "month"],
+        metavar="PERIOD",
+        help="Named look-back window: day (1), week (7), month (30). "
+             "Takes precedence over --days when both are supplied.",
+    )
     parser.add_argument("--days", "-d", type=int, default=1, metavar="N",
-                        help="Look back N days (default: 1 = today)")
+                        help="Look back N days (default: 1 = today). "
+                             "Ignored when --period is used.")
     parser.add_argument("--top", "-n", type=int, default=10, metavar="N",
                         help="Repos per category (default: 10)")
     parser.add_argument("--token", "-t", metavar="TOKEN",
@@ -566,9 +628,11 @@ Token setup:
             print("No snapshot file found.")
         sys.exit(0)
 
+    effective_days = resolve_period(args.period, args.days)
+
     find_repo_of_the_day(
         language=args.language,
-        since_days=args.days,
+        since_days=effective_days,
         top_n=args.top,
         keyword=args.keyword,
         search_in=args.search_in,
