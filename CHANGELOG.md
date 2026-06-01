@@ -10,6 +10,54 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.0] - 2026-06-01
+
+### Added
+- **`elapsed_days()`** — new pure function that parses the `saved_at` UTC
+  timestamp stored in each snapshot entry and returns the number of
+  fractional days elapsed since that save.  Handles both timezone-aware
+  (v1.5.0+) and naive UTC (legacy v1.x) timestamps.  Returns `None` for
+  missing, blank, or unparseable timestamps.  Guards against clock-skew /
+  same-second saves with a minimum floor of `1/86400` days.
+- **`daily_velocity()`** — new pure function computing the time-normalised
+  star growth rate: `star_delta / elapsed_days`, rounded to one decimal
+  place.  A repo that gained 1 400 stars over 14 days reports `100.0`,
+  the same as one that gained 100 stars in 24 hours — the number stays
+  meaningful regardless of how long ago the snapshot was taken.
+- **`daily_velocity` field** added to `EXPORT_FIELDS` and surfaced in
+  JSON / CSV exports (`null` / empty on first run).
+- **Updated `format_velocity()`** — signature changed from
+  `format_velocity(delta)` to `format_velocity(delta, velocity)`.  Output
+  now shows both the raw total (`+700 ⭐ total`) and the normalised rate
+  (`~100.0 ⭐/day`) side-by-side.
+- **Updated `format_repo()`** — passes `daily_velocity()` result to the
+  new `format_velocity()` signature.
+- **Updated `build_export_row()`** — includes `daily_velocity` field.
+- **Updated `save_snapshots()`** — now writes timezone-aware UTC
+  timestamps (`datetime.now(timezone.utc)`) instead of naive UTC, so
+  `elapsed_days()` can always compute an accurate interval.
+- Version bumped `1.4.0 → 1.5.0`.
+
+### Tests
+- **`TestElapsedDays`** — 7 new tests:
+  missing repo, missing `saved_at`, invalid timestamp, ~1 day, ~7 days,
+  legacy naive UTC timestamp, same-second floor guard.
+- **`TestDailyVelocity`** — 7 new tests:
+  no snapshot, velocity over 2 days, velocity over 7 days,
+  normalisation-independent-of-gap proof, zero delta, negative velocity,
+  one-decimal rounding.
+- **`TestFormatVelocity`** updated — asserts `⭐/day` and `total` labels;
+  covers `None`-delta-only edge case.
+- **`TestFormatRepo`** updated — asserts both `+delta` and `⭐/day` when
+  snapshot is present.
+- **`TestSaveSnapshots`** — new `test_saved_at_is_utc_iso_string` test
+  verifying timestamps are timezone-aware.
+- **`sample_snapshots` fixture** updated — `saved_at` is now a real
+  timestamp 2 days in the past (not a static string) so velocity tests
+  produce deterministic approximate values.
+
+---
+
 ## [1.4.1] - 2026-06-01
 
 ### Added

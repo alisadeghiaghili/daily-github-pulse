@@ -19,7 +19,34 @@
 
 Repos that appear in both result sets are **deduplicated** — shown only once.
 
-On every run, star counts are saved locally. The **next** run shows the delta (`+142 ⭐ since last run`), giving you real velocity data without any external service.
+---
+
+## Star Velocity
+
+On each run, star counts **and a UTC timestamp** are saved locally. The next run computes two numbers:
+
+| Metric | Formula | What it tells you |
+|---|---|---|
+| `star_delta` | `current − snapshot` | Total stars gained since last run |
+| `daily_velocity` | `star_delta ÷ elapsed_days` | Stars per day — stays meaningful even after a long gap |
+
+```
+  Δ +700 ⭐ total  |  ~100.0 ⭐/day
+```
+
+If you run the tool daily the two numbers are similar. If you haven't run it for two weeks, `star_delta` might be large but `daily_velocity` will still show the true per-day rate — the number that actually lets you compare repos fairly.
+
+On the first run (no previous snapshot):
+
+```
+  Δ  — (first run — no velocity data yet)
+```
+
+To reset the baseline:
+
+```bash
+python github_repo_of_the_day.py --clear-snapshots
+```
 
 ---
 
@@ -38,14 +65,9 @@ pip install -r requirements.txt
 ## Quick Start
 
 ```bash
-# Clone
 git clone https://github.com/alisadeghiaghili/daily-github-pulse.git
 cd daily-github-pulse
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Run
 python github_repo_of_the_day.py
 ```
 
@@ -92,16 +114,13 @@ python github_repo_of_the_day.py --period month --language rust
 python github_repo_of_the_day.py --days 14
 
 # Export as JSON to stdout, pipe into jq
-python github_repo_of_the_day.py --output json | jq '.[].full_name'
+python github_repo_of_the_day.py --output json | jq '.[].daily_velocity'
 
 # Export weekly CSV to a file
 python github_repo_of_the_day.py --period week --output csv --output-file weekly.csv
 
 # Search by keyword
 python github_repo_of_the_day.py --keyword "LLM agent" --output json
-
-# Search in README too (slower)
-python github_repo_of_the_day.py --keyword "MCP server" --search-in name,description,readme
 
 # Skip velocity tracking for a one-off run
 python github_repo_of_the_day.py --no-snapshot
@@ -128,41 +147,13 @@ GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxx
 
 > ⚠️ **Security**: `.env` is listed in `.gitignore`. Never commit your token.
 
-Alternatively, pass it inline:
-
-```bash
-python github_repo_of_the_day.py --token ghp_xxxxxxxxxxxxxxxx
-```
-
----
-
-## Star Velocity
-
-On each run, star counts are saved to `~/.daily-github-pulse/snapshots.json`. On the next run, the delta is shown:
-
-```
-  Δ +142 ⭐ since last run
-```
-
-On the first run, velocity shows:
-
-```
-  Δ  — (first run — no velocity data yet)
-```
-
-To reset the baseline:
-
-```bash
-python github_repo_of_the_day.py --clear-snapshots
-```
-
 ---
 
 ## Sample Output
 
 ```
 ######################################################################
-  daily-github-pulse v1.4.0  —  2026-06-01
+  daily-github-pulse v1.5.0  —  2026-06-01
   Auth     : Authenticated
   Velocity : enabled
 ######################################################################
@@ -173,7 +164,7 @@ python github_repo_of_the_day.py --clear-snapshots
 ======================================================================
 #1  awesome-org/cool-new-project
     Stars: 1,204  Forks: 87  Lang: Python
-  Δ +342 ⭐ since last run
+  Δ +342 ⭐ total  |  ~171.0 ⭐/day
     Created: 2026-06-01  |  Updated: 2026-06-01
     A blazing-fast tool for doing cool things with data
     https://github.com/awesome-org/cool-new-project
@@ -195,19 +186,22 @@ CLI args
    └─ Query 2: Active Giants  (GitHub Search API)
          │
          ▼
-  Deduplication (seen_ids set)
+  load_snapshots()  ◄──  ~/.daily-github-pulse/snapshots.json
          │
-         ├─── text  ──► format_repo()      ──► stdout
-         ├─── json  ──► export_json()      ──► stdout / file
-         └─── csv   ──► export_csv()       ──► stdout / file
+         ▼
+  For each repo:
+   ├─ star_delta()      = current_stars − snapshot_stars
+   ├─ elapsed_days()    = (now − saved_at).total_seconds / 86400
+   └─ daily_velocity()  = star_delta / elapsed_days  [⭐/day]
+         │
+         ├─── text  ──► format_repo()   ──► stdout
+         ├─── json  ──► export_json()   ──► stdout / file
+         └─── csv   ──► export_csv()    ──► stdout / file
          │
          ▼
   save_snapshots()  ──►  ~/.daily-github-pulse/snapshots.json
+                         (stars + UTC timestamp per repo)
 ```
-
-**Why two strategies?** GitHub has no official `/trending` endpoint. The two-query approach captures both fresh projects gaining momentum and established projects with recent activity — together they approximate what a trending page would show.
-
-**Why `--period` over `--days`?** For scripting and automation, named periods (`day`, `week`, `month`) are more readable and less error-prone than remembering that `--days 7` means a week. Both flags are kept for backward compatibility.
 
 ---
 
@@ -215,35 +209,16 @@ CLI args
 
 Every push and pull request to `main` automatically runs the full test suite across **Python 3.9 – 3.14** via GitHub Actions.
 
-```
-push / PR to main
-        │
-        ▼
-  test matrix (6 parallel jobs)
-   ├─ Python 3.9
-   ├─ Python 3.10
-   ├─ Python 3.11
-   ├─ Python 3.12
-   ├─ Python 3.13
-   └─ Python 3.14
-        │
-        ▼
-  notify job
-   └─ Telegram message  (✅ passed / ❌ failed)
-      — skipped silently if secrets not configured
-```
-
 ### Telegram Notifications (optional)
 
-To receive a Telegram message after each CI run, add two secrets to your repository:
-**Settings → Secrets and variables → Actions → New repository secret**
+Add two secrets to **Settings → Secrets and variables → Actions**:
 
 | Secret | Value |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | Token from [@BotFather](https://t.me/BotFather) |
 | `TELEGRAM_CHAT_ID` | ID of the chat/channel to notify |
 
-If the secrets are not set, the notify step is skipped silently — no errors.
+If the secrets are not set, the notify step is skipped silently.
 
 ---
 
@@ -261,9 +236,9 @@ All tests mock the GitHub API — no network access or token required.
 ## Limitations
 
 - GitHub has no official trending endpoint. Results are a best-effort approximation via the Search API.
-- Star velocity measures change between *your runs*, not absolute daily gains.
+- `daily_velocity` measures growth between *your runs*, not GitHub's internal counters.
 - Unauthenticated requests are limited to 60/hour; use a token for sustained use.
-- `--search-in readme` is significantly slower (GitHub indexes readme content separately).
+- `--search-in readme` is significantly slower.
 
 ---
 
@@ -271,7 +246,7 @@ All tests mock the GitHub API — no network access or token required.
 
 - [ ] `--format table` — tabular terminal output using `rich`
 - [ ] Scheduled GitHub Actions for daily digest
-- [ ] Multi-day velocity tracking (7-day moving average)
+- [ ] Multi-day velocity moving average (7-day)
 - [ ] Slack / webhook notification integration
 
 ---

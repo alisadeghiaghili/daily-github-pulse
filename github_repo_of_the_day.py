@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-daily-github-pulse  v1.4.0
+daily-github-pulse  v1.5.0
 ──────────────────────────
 Discover GitHub's top repositories of the day — with real star velocity.
 
@@ -9,9 +9,20 @@ How velocity works
 On each run, star counts are saved to a local snapshot file:
   ~/.daily-github-pulse/snapshots.json
 
-On the next run, the previous snapshot is loaded and the delta
-(stars gained since last run) is shown next to each repo.
-No external API calls or scraping — pure local arithmetic.
+Each snapshot entry stores:
+  - stars     : star count at save time
+  - saved_at  : UTC ISO timestamp of the save
+
+On the next run two velocity numbers are computed:
+
+  star_delta      — raw difference (current − snapshot), regardless of
+                    how much time has passed between runs.
+
+  daily_velocity  — time-normalised rate: star_delta / elapsed_days.
+                    This is the number that stays meaningful even if you
+                    haven't run the tool for two weeks.
+                    Rounded to one decimal place.
+                    None when no previous snapshot exists (first run).
 
 Token priority
 ──────────────
@@ -27,7 +38,7 @@ import io
 import json
 import os
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -42,7 +53,7 @@ except ImportError:
 # ──────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 SNAPSHOT_DIR = Path.home() / ".daily-github-pulse"
 SNAPSHOT_FILE = SNAPSHOT_DIR / "snapshots.json"
 
@@ -62,6 +73,7 @@ EXPORT_FIELDS = [
     "full_name",
     "stars",
     "star_delta",
+    "daily_velocity",
     "forks",
     "language",
     "description",
@@ -130,7 +142,7 @@ def load_snapshots() -> dict:
     Load previously saved star counts from disk.
 
     Returns:
-        dict mapping repo full_name -> {"stars": int, "saved_at": ISO string}.
+        dict mapping repo full_name → {"stars": int, "saved_at": ISO string}.
         Empty dict if the file does not exist or is corrupted.
     """
     if not SNAPSHOT_FILE.exists():
@@ -149,7 +161,7 @@ def save_snapshots(repos_by_category: dict) -> None:
         repos_by_category: output of search_trending_repos().
     """
     existing = load_snapshots()
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     for repos in repos_by_category.values():
         for repo in repos:
@@ -166,7 +178,7 @@ def save_snapshots(repos_by_category: dict) -> None:
 
 def star_delta(repo: dict, snapshots: dict) -> int | None:
     """
-    Calculate stars gained since the last snapshot.
+    Calculate stars gained since the last snapshot (raw, not time-normalised).
 
     Args:
         repo:      repo dict from GitHub API.
@@ -185,6 +197,87 @@ def star_delta(repo: dict, snapshots: dict) -> int | None:
     if prev is None:
         return None
     return repo["stargazers_count"] - prev["stars"]
+
+
+def elapsed_days(snapshots: dict, full_name: str) -> float | None:
+    """
+    Return the number of days elapsed since the snapshot was saved.
+
+    Parses the ``saved_at`` ISO timestamp stored in the snapshot entry and
+    computes the difference against the current UTC time.
+
+    Args:
+        snapshots:  loaded snapshot data (from ``load_snapshots()``).
+        full_name:  repository full name, e.g. ``"owner/repo"``.
+
+    Returns:
+        Elapsed time in fractional days (always > 0), or ``None`` if the
+        repo has no snapshot entry or the ``saved_at`` field is missing /
+        unparseable.
+
+    Examples:
+        >>> import json
+        >>> from datetime import datetime, timezone, timedelta
+        >>> ts = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+        >>> snaps = {"owner/repo": {"stars": 100, "saved_at": ts}}
+        >>> days = elapsed_days(snaps, "owner/repo")
+        >>> 0.4 < days < 0.6  # roughly 0.5 day
+        True
+    """
+    entry = snapshots.get(full_name)
+    if entry is None:
+        return None
+    saved_at_raw = entry.get("saved_at")
+    if not saved_at_raw:
+        return None
+    try:
+        # datetime.fromisoformat handles both offset-aware and naive strings.
+        # Snapshots written by this tool are always UTC-aware after v1.5.0;
+        # older entries written by v1.x are naive UTC — treat them as UTC.
+        saved_dt = datetime.fromisoformat(saved_at_raw)
+        if saved_dt.tzinfo is None:
+            saved_dt = saved_dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        delta_seconds = (now - saved_dt).total_seconds()
+        # Guard against clock skew or same-second saves
+        return max(delta_seconds / 86400, 1 / 86400)
+    except (ValueError, TypeError):
+        return None
+
+
+def daily_velocity(repo: dict, snapshots: dict) -> float | None:
+    """
+    Compute the time-normalised star growth rate in stars per day.
+
+    Unlike ``star_delta()``, this value stays meaningful regardless of how
+    long ago the snapshot was taken.  A repo that gained 1 400 stars over
+    14 days reports a ``daily_velocity`` of 100.0, the same as a repo that
+    gained 100 stars today.
+
+    Args:
+        repo:      repo dict from GitHub API.
+        snapshots: loaded snapshot data.
+
+    Returns:
+        Stars per day rounded to one decimal place, or ``None`` when no
+        previous snapshot exists for this repo (first run).
+
+    Examples:
+        >>> import json
+        >>> from datetime import datetime, timezone, timedelta
+        >>> ts = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        >>> snaps = {"owner/repo": {"stars": 12400, "saved_at": ts}}
+        >>> repo = {"full_name": "owner/repo", "stargazers_count": 13100}
+        >>> daily_velocity(repo, snaps)
+        100.0
+    """
+    delta = star_delta(repo, snapshots)
+    if delta is None:
+        return None
+    days = elapsed_days(snapshots, repo["full_name"])
+    if days is None:
+        return None
+    return round(delta / days, 1)
 
 
 # ──────────────────────────────────────────────
@@ -262,8 +355,8 @@ def build_export_row(repo: dict, rank: int, category: str, snapshots: dict) -> d
     Build a flat export record from a repo dict.
 
     Extracts and renames the fields defined in EXPORT_FIELDS.
-    The ``star_delta`` field is ``null`` / empty string when no previous
-    snapshot exists for this repo.
+    ``star_delta`` and ``daily_velocity`` are ``null`` / empty string on
+    the first run (no previous snapshot exists).
 
     Args:
         repo:      repo dict from GitHub API.
@@ -275,18 +368,20 @@ def build_export_row(repo: dict, rank: int, category: str, snapshots: dict) -> d
         Ordered dict suitable for JSON serialisation or csv.DictWriter.
     """
     delta = star_delta(repo, snapshots)
+    velocity = daily_velocity(repo, snapshots)
     return {
-        "rank":        rank,
-        "category":    category,
-        "full_name":   repo["full_name"],
-        "stars":       repo["stargazers_count"],
-        "star_delta":  delta,           # None → null in JSON, "" in CSV
-        "forks":       repo["forks_count"],
-        "language":    repo.get("language") or "",
-        "description": (repo.get("description") or "").replace("\n", " "),
-        "created_at":  repo["created_at"][:10],
-        "updated_at":  repo["updated_at"][:10],
-        "url":         repo["html_url"],
+        "rank":           rank,
+        "category":       category,
+        "full_name":      repo["full_name"],
+        "stars":          repo["stargazers_count"],
+        "star_delta":     delta,      # None → null in JSON, "" in CSV
+        "daily_velocity": velocity,   # None → null in JSON, "" in CSV
+        "forks":          repo["forks_count"],
+        "language":       repo.get("language") or "",
+        "description":    (repo.get("description") or "").replace("\n", " "),
+        "created_at":     repo["created_at"][:10],
+        "updated_at":     repo["updated_at"][:10],
+        "url":            repo["html_url"],
     }
 
 
@@ -311,7 +406,8 @@ def export_csv(rows: list[dict]) -> str:
     the file opens correctly in Excel and LibreOffice without manual
     encoding selection.
 
-    ``None`` values (star_delta on first run) are written as empty strings.
+    ``None`` values (star_delta / daily_velocity on first run) are written
+    as empty strings.
 
     Args:
         rows: list of dicts as returned by build_export_row().
@@ -328,7 +424,6 @@ def export_csv(rows: list[dict]) -> str:
     )
     writer.writeheader()
     for row in rows:
-        # Replace None with empty string for clean CSV output
         writer.writerow({k: ("" if v is None else v) for k, v in row.items()})
     return buf.getvalue()
 
@@ -354,22 +449,33 @@ def write_output(content: str, output_file: str | None, fmt: str) -> None:
 # ──────────────────────────────────────────────
 # Text formatting (human-readable)
 # ──────────────────────────────────────────────
-def format_velocity(delta: int | None) -> str:
+def format_velocity(delta: int | None, velocity: float | None) -> str:
     """
-    Render a star delta as a human-readable velocity badge.
+    Render star delta and daily velocity as a human-readable badge.
+
+    Shows both the raw delta (total stars gained since last snapshot) and
+    the time-normalised rate (stars per day), so the number stays
+    meaningful even when the tool hasn't been run for days or weeks.
+
+    Args:
+        delta:    Raw star delta from ``star_delta()``.
+        velocity: Stars-per-day from ``daily_velocity()``.
+
+    Returns:
+        Single-line string starting with two spaces.
 
     Examples:
-        >>> format_velocity(None)
+        >>> format_velocity(None, None)
         '  Δ  — (first run — no velocity data yet)'
-        >>> format_velocity(142)
-        '  Δ +142 ⭐ since last run'
-        >>> format_velocity(-3)
-        '  Δ -3 ⭐ since last run'
+        >>> format_velocity(700, 100.0)
+        '  Δ +700 ⭐ total  |  ~100.0 ⭐/day'
+        >>> format_velocity(0, 0.0)
+        '  Δ 0 ⭐ total  |  ~0.0 ⭐/day'
     """
-    if delta is None:
+    if delta is None or velocity is None:
         return "  Δ  — (first run — no velocity data yet)"
     sign = "+" if delta > 0 else ""
-    return f"  Δ {sign}{delta:,} ⭐ since last run"
+    return f"  Δ {sign}{delta:,} ⭐ total  |  ~{velocity:,} ⭐/day"
 
 
 def format_repo(repo: dict, rank: int, snapshots: dict) -> str:
@@ -385,13 +491,14 @@ def format_repo(repo: dict, rank: int, snapshots: dict) -> str:
         Multi-line string ending with a trailing newline.
     """
     delta = star_delta(repo, snapshots)
+    velocity = daily_velocity(repo, snapshots)
     return (
         f"{'=' * 70}\n"
         f"#{rank}  {repo['full_name']}\n"
         f"    Stars: {repo['stargazers_count']:,}  "
         f"Forks: {repo['forks_count']:,}  "
         f"Lang: {repo.get('language') or 'N/A'}\n"
-        f"{format_velocity(delta)}\n"
+        f"{format_velocity(delta, velocity)}\n"
         f"    Created: {repo['created_at'][:10]}  |  Updated: {repo['updated_at'][:10]}\n"
         f"    {(repo.get('description') or 'No description')[:80]}\n"
         f"    {repo['html_url']}\n"
@@ -438,7 +545,6 @@ def find_repo_of_the_day(
     Raises:
         SystemExit(1): On GitHub API errors.
     """
-    # Header is only useful for human readers
     if output_fmt == "text":
         print(f"\n{'#' * 70}")
         print(f"  daily-github-pulse v{VERSION}  —  {date.today().isoformat()}")
@@ -477,7 +583,6 @@ def find_repo_of_the_day(
               file=sys.stderr)
         sys.exit(1)
 
-    # ─ Render output ─────────────────────────────────────────
     if output_fmt == "text":
         for category, repos in all_results.items():
             print(f"\n{'─' * 70}")
@@ -488,20 +593,16 @@ def find_repo_of_the_day(
                 continue
             for i, repo in enumerate(repos, 1):
                 print(format_repo(repo, i, snapshots))
-
     else:
-        # Build flat list of export rows across all categories
         rows: list[dict] = []
         for category, repos in all_results.items():
             for i, repo in enumerate(repos, 1):
                 rows.append(build_export_row(repo, i, category, snapshots))
-
         if output_fmt == "json":
             write_output(export_json(rows), output_file, "json")
         elif output_fmt == "csv":
             write_output(export_csv(rows), output_file, "csv")
 
-    # ─ Save snapshot ───────────────────────────────────────
     if use_snapshots:
         save_snapshots(all_results)
         if output_fmt == "text":

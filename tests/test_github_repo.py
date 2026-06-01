@@ -13,15 +13,32 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Make the project root importable regardless of working directory
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import github_repo_of_the_day as m
+
+
+# ──────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────
+
+def _ts(days_ago: float = 0) -> str:
+    """Return a UTC ISO timestamp N days in the past."""
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+
+
+def _mock_response(items: list) -> MagicMock:
+    """Build a mock requests.Response returning ``items``."""
+    resp = MagicMock()
+    resp.json.return_value = {"items": items}
+    resp.raise_for_status.return_value = None
+    return resp
 
 
 # ──────────────────────────────────────────────
@@ -46,11 +63,11 @@ def sample_repo() -> dict:
 
 @pytest.fixture()
 def sample_snapshots() -> dict:
-    """Snapshot data matching ``sample_repo`` with a lower star count."""
+    """Snapshot taken exactly 2 days ago with 12 400 stars."""
     return {
         "owner/repo": {
             "stars": 12400,
-            "saved_at": "2026-05-31T10:00:00",
+            "saved_at": _ts(days_ago=2),
         }
     }
 
@@ -111,7 +128,6 @@ class TestResolvePeriod:
         assert m.resolve_period(None, 1) == 1
 
     def test_period_takes_precedence_over_days(self):
-        # Even if --days 999 was passed, --period week wins
         assert m.resolve_period("week", 999) == 7
 
     def test_case_insensitive_upper(self):
@@ -177,18 +193,21 @@ class TestSaveSnapshots:
         data = json.loads(tmp_snapshot_file.read_text())
         assert data["owner/repo"]["stars"] == 12542
 
-    def test_merges_with_existing_data(self, tmp_snapshot_file, sample_snapshots):
-        existing = {"other/repo": {"stars": 999, "saved_at": "2026-01-01T00:00:00"}}
+    def test_saved_at_is_utc_iso_string(self, tmp_snapshot_file, sample_repo):
+        m.save_snapshots({"New Today": [sample_repo]})
+        data = json.loads(tmp_snapshot_file.read_text())
+        saved_at = data["owner/repo"]["saved_at"]
+        # Must be parseable and timezone-aware
+        dt = datetime.fromisoformat(saved_at)
+        assert dt.tzinfo is not None
+
+    def test_merges_with_existing_data(self, tmp_snapshot_file):
+        existing = {"other/repo": {"stars": 999, "saved_at": _ts(1)}}
         tmp_snapshot_file.parent.mkdir(parents=True, exist_ok=True)
         tmp_snapshot_file.write_text(json.dumps(existing), encoding="utf-8")
-
-        new_repo = {
-            "full_name": "owner/new",
-            "stargazers_count": 50,
-        }
+        new_repo = {"full_name": "owner/new", "stargazers_count": 50}
         m.save_snapshots({"New Today": [new_repo]})
         data = json.loads(tmp_snapshot_file.read_text())
-
         assert "other/repo" in data
         assert "owner/new" in data
 
@@ -209,6 +228,7 @@ class TestStarDelta:
         assert m.star_delta(sample_repo, {}) is None
 
     def test_positive_delta(self, sample_repo, sample_snapshots):
+        # snapshot: 12400 stars 2 days ago; current: 12542 → delta = 142
         assert m.star_delta(sample_repo, sample_snapshots) == 142
 
     def test_zero_delta(self, sample_repo, sample_snapshots):
@@ -221,33 +241,137 @@ class TestStarDelta:
 
 
 # ──────────────────────────────────────────────
+# elapsed_days
+# ──────────────────────────────────────────────
+
+class TestElapsedDays:
+    def test_returns_none_for_missing_repo(self):
+        assert m.elapsed_days({}, "owner/repo") is None
+
+    def test_returns_none_for_missing_saved_at(self):
+        snaps = {"owner/repo": {"stars": 100}}
+        assert m.elapsed_days(snaps, "owner/repo") is None
+
+    def test_returns_none_for_invalid_timestamp(self):
+        snaps = {"owner/repo": {"stars": 100, "saved_at": "not-a-date"}}
+        assert m.elapsed_days(snaps, "owner/repo") is None
+
+    def test_approximately_one_day(self):
+        snaps = {"owner/repo": {"stars": 100, "saved_at": _ts(days_ago=1)}}
+        result = m.elapsed_days(snaps, "owner/repo")
+        assert result is not None
+        assert 0.99 < result < 1.01
+
+    def test_approximately_seven_days(self):
+        snaps = {"owner/repo": {"stars": 100, "saved_at": _ts(days_ago=7)}}
+        result = m.elapsed_days(snaps, "owner/repo")
+        assert result is not None
+        assert 6.99 < result < 7.01
+
+    def test_naive_utc_timestamp_treated_as_utc(self):
+        # Old snapshots written before v1.5.0 have no timezone info
+        naive_ts = (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S")
+        snaps = {"owner/repo": {"stars": 100, "saved_at": naive_ts}}
+        result = m.elapsed_days(snaps, "owner/repo")
+        assert result is not None
+        assert 2.99 < result < 3.01
+
+    def test_same_second_save_does_not_return_zero(self):
+        # Guard: minimum is 1/86400 (one second), never 0
+        snaps = {"owner/repo": {"stars": 100, "saved_at": _ts(days_ago=0)}}
+        result = m.elapsed_days(snaps, "owner/repo")
+        assert result is not None
+        assert result > 0
+
+
+# ──────────────────────────────────────────────
+# daily_velocity
+# ──────────────────────────────────────────────
+
+class TestDailyVelocity:
+    def test_returns_none_when_no_snapshot(self, sample_repo):
+        assert m.daily_velocity(sample_repo, {}) is None
+
+    def test_velocity_over_two_days(self, sample_repo, sample_snapshots):
+        # delta=142, elapsed≈2 days → velocity ≈ 71.0
+        result = m.daily_velocity(sample_repo, sample_snapshots)
+        assert result is not None
+        assert 70.0 < result < 72.0
+
+    def test_velocity_one_week(self, sample_repo):
+        snaps = {"owner/repo": {"stars": 12400, "saved_at": _ts(days_ago=7)}}
+        # delta=142 over 7 days → ≈20.3
+        result = m.daily_velocity(sample_repo, snaps)
+        assert result is not None
+        assert 20.0 < result < 21.0
+
+    def test_velocity_normalised_regardless_of_gap(self, sample_repo):
+        """Same delta over different gaps must produce different velocities."""
+        snaps_short = {"owner/repo": {"stars": 12400, "saved_at": _ts(days_ago=1)}}
+        snaps_long  = {"owner/repo": {"stars": 12400, "saved_at": _ts(days_ago=14)}}
+        v_short = m.daily_velocity(sample_repo, snaps_short)
+        v_long  = m.daily_velocity(sample_repo, snaps_long)
+        assert v_short is not None and v_long is not None
+        assert v_short > v_long
+
+    def test_zero_delta_gives_zero_velocity(self, sample_repo):
+        snaps = {"owner/repo": {"stars": 12542, "saved_at": _ts(days_ago=1)}}
+        assert m.daily_velocity(sample_repo, snaps) == 0.0
+
+    def test_negative_velocity(self, sample_repo):
+        snaps = {"owner/repo": {"stars": 13000, "saved_at": _ts(days_ago=1)}}
+        result = m.daily_velocity(sample_repo, snaps)
+        assert result is not None
+        assert result < 0
+
+    def test_result_is_rounded_to_one_decimal(self, sample_repo):
+        snaps = {"owner/repo": {"stars": 12400, "saved_at": _ts(days_ago=3)}}
+        result = m.daily_velocity(sample_repo, snaps)
+        assert result is not None
+        assert result == round(result, 1)
+
+
+# ──────────────────────────────────────────────
 # format_velocity
 # ──────────────────────────────────────────────
 
 class TestFormatVelocity:
     def test_none_shows_first_run_message(self):
-        result = m.format_velocity(None)
+        result = m.format_velocity(None, None)
         assert "first run" in result
         assert "Δ" in result
 
+    def test_none_delta_only_shows_first_run(self):
+        result = m.format_velocity(None, 42.0)
+        assert "first run" in result
+
     def test_positive_delta_shows_plus_sign(self):
-        result = m.format_velocity(142)
+        result = m.format_velocity(142, 71.0)
         assert "+142" in result
         assert "⭐" in result
 
+    def test_shows_daily_velocity(self):
+        result = m.format_velocity(142, 71.0)
+        assert "71.0" in result
+        assert "⭐/day" in result
+
     def test_zero_delta(self):
-        result = m.format_velocity(0)
+        result = m.format_velocity(0, 0.0)
         assert "⭐" in result
         assert "+" not in result
 
     def test_negative_delta_no_plus_sign(self):
-        result = m.format_velocity(-3)
+        result = m.format_velocity(-3, -1.5)
         assert "-3" in result
         assert "+" not in result
 
     def test_large_number_uses_comma_separator(self):
-        result = m.format_velocity(10000)
+        result = m.format_velocity(10000, 1000.0)
         assert "10,000" in result
+
+    def test_shows_total_label(self):
+        result = m.format_velocity(100, 50.0)
+        assert "total" in result
 
 
 # ──────────────────────────────────────────────
@@ -275,9 +399,10 @@ class TestFormatRepo:
         output = m.format_repo(sample_repo, 1, {})
         assert "first run" in output
 
-    def test_with_snapshot_shows_delta(self, sample_repo, sample_snapshots):
+    def test_with_snapshot_shows_delta_and_velocity(self, sample_repo, sample_snapshots):
         output = m.format_repo(sample_repo, 1, sample_snapshots)
         assert "+142" in output
+        assert "⭐/day" in output
 
     def test_missing_description_shows_fallback(self, sample_repo):
         sample_repo["description"] = None
@@ -300,14 +425,6 @@ class TestFormatRepo:
 # search_trending_repos
 # ──────────────────────────────────────────────
 
-def _mock_response(items: list) -> MagicMock:
-    """Build a mock requests.Response returning ``items``."""
-    resp = MagicMock()
-    resp.json.return_value = {"items": items}
-    resp.raise_for_status.return_value = None
-    return resp
-
-
 class TestSearchTrendingRepos:
     def test_returns_two_categories(self, sample_repo):
         with patch("github_repo_of_the_day.requests.get") as mock_get:
@@ -316,15 +433,10 @@ class TestSearchTrendingRepos:
         assert set(result.keys()) == {"New Today", "Active Giants"}
 
     def test_deduplication_across_categories(self, sample_repo):
-        """A repo returned by both queries should appear only in the first."""
         with patch("github_repo_of_the_day.requests.get") as mock_get:
             mock_get.return_value = _mock_response([sample_repo])
             result = m.search_trending_repos()
-        all_ids = [
-            repo["id"]
-            for repos in result.values()
-            for repo in repos
-        ]
+        all_ids = [repo["id"] for repos in result.values() for repo in repos]
         assert all_ids.count(sample_repo["id"]) == 1
 
     def test_language_filter_appended_to_query(self, sample_repo):
