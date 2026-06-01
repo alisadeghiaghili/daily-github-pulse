@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-daily-github-pulse  v1.2.0
+daily-github-pulse  v1.3.0
 ──────────────────────────
 Discover GitHub's top repositories of the day — with real star velocity.
 
@@ -22,11 +22,14 @@ Token priority
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 import requests
 
@@ -37,42 +40,35 @@ except ImportError:
     pass  # python-dotenv is optional
 
 # ──────────────────────────────────────────────
-# Constants
+Constants
 # ──────────────────────────────────────────────
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 SNAPSHOT_DIR = Path.home() / ".daily-github-pulse"
 SNAPSHOT_FILE = SNAPSHOT_DIR / "snapshots.json"
 
 GITHUB_TOKEN: str | None = os.getenv("GITHUB_TOKEN")
 
+# Fields included in JSON / CSV exports (in order)
+EXPORT_FIELDS = [
+    "rank",
+    "category",
+    "full_name",
+    "stars",
+    "star_delta",
+    "forks",
+    "language",
+    "description",
+    "created_at",
+    "updated_at",
+    "url",
+]
+
 
 # ──────────────────────────────────────────────
-# GitHub API helpers
+GitHub API helpers
 # ──────────────────────────────────────────────
 def get_headers() -> dict:
-    """
-    Build HTTP request headers for the GitHub REST API.
-
-    Reads the module-level ``GITHUB_TOKEN`` variable.  When a token is
-    present the ``Authorization`` header is included, which raises the
-    API rate limit from 60 to 5,000 requests per hour.
-
-    Returns:
-        dict: Headers dict ready to pass to ``requests.get()``.
-              Always includes ``Accept: application/vnd.github+json``.
-              Includes ``Authorization: Bearer <token>`` when
-              ``GITHUB_TOKEN`` is set.
-
-    Examples:
-        >>> import github_repo_of_the_day as m
-        >>> m.GITHUB_TOKEN = None
-        >>> m.get_headers()
-        {'Accept': 'application/vnd.github+json'}
-
-        >>> m.GITHUB_TOKEN = 'ghp_test'
-        >>> m.get_headers()
-        {'Accept': 'application/vnd.github+json', 'Authorization': 'Bearer ghp_test'}
-    """
+    """Build HTTP headers for the GitHub REST API."""
     headers = {"Accept": "application/vnd.github+json"}
     if GITHUB_TOKEN:
         headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
@@ -80,39 +76,15 @@ def get_headers() -> dict:
 
 
 # ──────────────────────────────────────────────
-# Snapshot helpers
+Snapshot helpers
 # ──────────────────────────────────────────────
 def load_snapshots() -> dict:
     """
     Load previously saved star counts from disk.
 
-    Reads ``~/.daily-github-pulse/snapshots.json``.  The file is created
-    automatically by :func:`save_snapshots` after each successful run.
-    Corrupt or missing files are handled gracefully — an empty dict is
-    returned instead of raising an exception.
-
     Returns:
-        dict: Mapping of ``repo_full_name`` (str) to a snapshot record::
-
-                {
-                    "owner/repo": {
-                        "stars": 12400,
-                        "saved_at": "2026-06-01T10:30:00"
-                    },
-                    ...
-                }
-
-              Returns ``{}`` when the snapshot file does not exist or
-              cannot be parsed.
-
-    Examples:
-        >>> # First run — no file yet
-        >>> load_snapshots()
-        {}
-
-        >>> # After a successful run the file exists
-        >>> load_snapshots()
-        {'owner/repo': {'stars': 12400, 'saved_at': '2026-06-01T10:30:00'}}
+        dict mapping repo full_name -> {"stars": int, "saved_at": ISO string}.
+        Empty dict if the file does not exist or is corrupted.
     """
     if not SNAPSHOT_FILE.exists():
         return {}
@@ -124,34 +96,10 @@ def load_snapshots() -> dict:
 
 def save_snapshots(repos_by_category: dict) -> None:
     """
-    Persist current star counts to disk, merging with existing snapshot data.
-
-    Creates ``~/.daily-github-pulse/`` if it does not exist.
-    Existing entries are preserved; entries for repos seen in this run
-    are overwritten with the latest star count and timestamp.
+    Persist current star counts to disk, merging with existing data.
 
     Args:
-        repos_by_category (dict): Return value of :func:`search_trending_repos`.
-            Structure::
-
-                {
-                    "New Today": [<repo_dict>, ...],
-                    "Active Giants": [<repo_dict>, ...]
-                }
-
-            Each repo dict must contain at least ``full_name`` (str) and
-            ``stargazers_count`` (int).
-
-    Returns:
-        None
-
-    Raises:
-        OSError: If the snapshot directory cannot be created or the file
-            cannot be written (e.g. permission denied).
-
-    Examples:
-        >>> repos = {"New Today": [{"full_name": "a/b", "stargazers_count": 100}]}
-        >>> save_snapshots(repos)   # writes ~/.daily-github-pulse/snapshots.json
+        repos_by_category: output of search_trending_repos().
     """
     existing = load_snapshots()
     now = datetime.utcnow().isoformat()
@@ -171,39 +119,20 @@ def save_snapshots(repos_by_category: dict) -> None:
 
 def star_delta(repo: dict, snapshots: dict) -> int | None:
     """
-    Calculate stars gained since the last snapshot for a single repo.
-
-    Compares the repo's current ``stargazers_count`` against the value
-    stored in the most recent snapshot.  A negative result means the repo
-    lost stars (uncommon but possible after spam cleanup).
+    Calculate stars gained since the last snapshot.
 
     Args:
-        repo (dict): Repo dict from the GitHub Search API.  Must contain:
-            - ``full_name`` (str): e.g. ``"owner/repo"``
-            - ``stargazers_count`` (int): current total star count
-        snapshots (dict): Loaded snapshot data as returned by
-            :func:`load_snapshots`.
+        repo:      repo dict from GitHub API.
+        snapshots: loaded snapshot data.
 
     Returns:
-        int | None:
-            - ``int`` — star delta since last snapshot (positive, zero, or
-              negative).
-            - ``None`` — no previous snapshot exists for this repo (first
-              time it appears in results).
+        int delta, or None if no previous snapshot exists for this repo.
 
     Examples:
         >>> snapshots = {"owner/repo": {"stars": 12400, "saved_at": "..."}}
         >>> repo = {"full_name": "owner/repo", "stargazers_count": 12542}
         >>> star_delta(repo, snapshots)
         142
-
-        >>> repo_new = {"full_name": "owner/new", "stargazers_count": 50}
-        >>> star_delta(repo_new, snapshots) is None
-        True
-
-        >>> repo_loss = {"full_name": "owner/repo", "stargazers_count": 12397}
-        >>> star_delta(repo_loss, snapshots)
-        -3
     """
     prev = snapshots.get(repo["full_name"])
     if prev is None:
@@ -212,7 +141,7 @@ def star_delta(repo: dict, snapshots: dict) -> int | None:
 
 
 # ──────────────────────────────────────────────
-# Core search
+Core search
 # ──────────────────────────────────────────────
 def search_trending_repos(
     language: str | None = None,
@@ -224,92 +153,38 @@ def search_trending_repos(
     """
     Query the GitHub Search API and return top repositories by category.
 
-    Uses two complementary search strategies to approximate trending
-    activity, since GitHub provides no official trending API endpoint:
+    Uses two complementary strategies since GitHub has no official trending
+    endpoint:
 
-    - **New Today** — repos created within the last ``since_days`` days
-      with more than 10 stars.  Catches fast-rising newcomers.
-    - **Active Giants** — repos pushed within the last ``since_days`` days
-      with more than 1,000 stars.  Catches established projects that are
-      still actively maintained and generating engagement.
+    - New Today     — recently created repos with >10 stars (newcomers).
+    - Active Giants — recently pushed repos with >1000 stars (veterans).
 
-    Both queries sort by total stars descending.  A repo that appears in
-    both result sets is shown only once (in whichever category returns it
-    first) — see the deduplication guarantee below.
+    Repos appearing in both result sets are deduplicated — shown only in
+    the first category that returns them.
 
     Args:
-        language (str | None): Optional programming language filter.
-            Must match GitHub's language identifiers (case-insensitive),
-            e.g. ``"python"``, ``"typescript"``, ``"rust"``.
-            Defaults to ``None`` (all languages).
-        since_days (int): How many calendar days back to include.
-            ``1`` means today only (since midnight UTC).
-            Defaults to ``1``.
-        top_n (int): Maximum number of results per category.
-            GitHub Search API hard limit is 100.
-            Defaults to ``10``.
-        keyword (str | None): Optional free-text keyword to match against
-            repo metadata.  The scope is controlled by ``search_in``.
-            Defaults to ``None`` (no keyword filter).
-        search_in (str): Comma-separated list of fields to search the
-            keyword in.  Valid tokens: ``"name"``, ``"description"``,
-            ``"readme"``.  Any combination is accepted.
-            Defaults to ``"name,description"``.
-
-            .. warning::
-                Including ``"readme"`` triggers GitHub’s full-text index
-                and can increase response time to 10–15 seconds.
+        language:   Optional language filter (e.g. "python", "rust").
+        since_days: Days to look back (default: 1 = today).
+        top_n:      Max results per category; GitHub hard limit is 100.
+        keyword:    Optional keyword to match against repo metadata.
+        search_in:  Comma-separated search scope for keyword.
+                    Valid tokens: "name", "description", "readme".
+                    Default: "name,description".
+                    Warning: "readme" is significantly slower.
 
     Returns:
-        dict: Ordered mapping of category label → list of repo dicts::
-
-                {
-                    "New Today":     [<repo_dict>, ...],
-                    "Active Giants": [<repo_dict>, ...]
-                }
-
-            Each repo dict is the raw object returned by the GitHub Search
-            API (see https://docs.github.com/en/rest/search/search).  Key
-            fields used downstream: ``id``, ``full_name``,
-            ``stargazers_count``, ``forks_count``, ``language``,
-            ``description``, ``created_at``, ``updated_at``,
-            ``html_url``.
-
-            **Deduplication guarantee**: a repo whose ``id`` already
-            appeared in an earlier category is excluded from all
-            subsequent categories.
+        dict: {category_label: [repo_dict, ...]}
 
     Raises:
-        requests.HTTPError: Raised (via ``raise_for_status()``) when the
-            GitHub API returns a 4xx or 5xx status.  Common causes:
-            - 403 Forbidden — rate limit exceeded (add a token).
-            - 422 Unprocessable Entity — malformed query string.
-        requests.ConnectionError: No network connectivity.
-        requests.Timeout: GitHub did not respond within 15 seconds.
-
-    Examples:
-        >>> # Unauthenticated, today only, all languages
-        >>> results = search_trending_repos()
-        >>> list(results.keys())
-        ['New Today', 'Active Giants']
-
-        >>> # Top 5 Python repos, last 7 days
-        >>> results = search_trending_repos(language="python", since_days=7, top_n=5)
-        >>> all(len(v) <= 5 for v in results.values())
-        True
-
-        >>> # Keyword search scoped to name + description
-        >>> results = search_trending_repos(keyword="LLM agent", search_in="name,description")
+        requests.HTTPError, requests.ConnectionError, requests.Timeout
     """
     since_date = (date.today() - timedelta(days=since_days)).isoformat()
-
     keyword_qualifier = f" {keyword} in:{search_in}" if keyword else ""
 
     queries = {
         "New Today": f"created:>={since_date} stars:>10{keyword_qualifier}",
         "Active Giants": f"pushed:>={since_date} stars:>1000{keyword_qualifier}",
     }
-
     if language:
         queries = {k: v + f" language:{language}" for k, v in queries.items()}
 
@@ -325,7 +200,6 @@ def search_trending_repos(
         )
         resp.raise_for_status()
         items = resp.json().get("items", [])
-
         unique = [r for r in items if r["id"] not in seen_ids]
         seen_ids.update(r["id"] for r in unique)
         results[label] = unique
@@ -334,34 +208,114 @@ def search_trending_repos(
 
 
 # ──────────────────────────────────────────────
-# Formatting
+Export helpers
+# ──────────────────────────────────────────────
+def build_export_row(repo: dict, rank: int, category: str, snapshots: dict) -> dict:
+    """
+    Build a flat export record from a repo dict.
+
+    Extracts and renames the fields defined in EXPORT_FIELDS.
+    The ``star_delta`` field is ``null`` / empty string when no previous
+    snapshot exists for this repo.
+
+    Args:
+        repo:      repo dict from GitHub API.
+        rank:      1-based rank within its category.
+        category:  category label (e.g. "New Today").
+        snapshots: loaded snapshot data.
+
+    Returns:
+        Ordered dict suitable for JSON serialisation or csv.DictWriter.
+    """
+    delta = star_delta(repo, snapshots)
+    return {
+        "rank":        rank,
+        "category":    category,
+        "full_name":   repo["full_name"],
+        "stars":       repo["stargazers_count"],
+        "star_delta":  delta,           # None → null in JSON, "" in CSV
+        "forks":       repo["forks_count"],
+        "language":    repo.get("language") or "",
+        "description": (repo.get("description") or "").replace("\n", " "),
+        "created_at":  repo["created_at"][:10],
+        "updated_at":  repo["updated_at"][:10],
+        "url":         repo["html_url"],
+    }
+
+
+def export_json(rows: list[dict]) -> str:
+    """
+    Serialise export rows to a JSON string.
+
+    Args:
+        rows: list of dicts as returned by build_export_row().
+
+    Returns:
+        Pretty-printed JSON string (2-space indent, ensure_ascii=False).
+    """
+    return json.dumps(rows, indent=2, ensure_ascii=False)
+
+
+def export_csv(rows: list[dict]) -> str:
+    """
+    Serialise export rows to a CSV string.
+
+    Uses the standard ``csv`` module with ``utf-8-sig`` BOM encoding so
+    the file opens correctly in Excel and LibreOffice without manual
+    encoding selection.
+
+    ``None`` values (star_delta on first run) are written as empty strings.
+
+    Args:
+        rows: list of dicts as returned by build_export_row().
+
+    Returns:
+        CSV string with header row and one data row per repo.
+    """
+    buf = io.StringIO()
+    writer = csv.DictWriter(
+        buf,
+        fieldnames=EXPORT_FIELDS,
+        lineterminator="\n",
+        extrasaction="ignore",
+    )
+    writer.writeheader()
+    for row in rows:
+        # Replace None with empty string for clean CSV output
+        writer.writerow({k: ("" if v is None else v) for k, v in row.items()})
+    return buf.getvalue()
+
+
+def write_output(content: str, output_file: str | None, fmt: str) -> None:
+    """
+    Write export content to a file or stdout.
+
+    Args:
+        content:     String content to write (JSON or CSV).
+        output_file: File path string, or None to write to stdout.
+        fmt:         Format label used only in the confirmation message
+                     when writing to a file ("json" or "csv").
+    """
+    if output_file:
+        encoding = "utf-8-sig" if fmt == "csv" else "utf-8"
+        Path(output_file).write_text(content, encoding=encoding)
+        print(f"  Exported {fmt.upper()} → {output_file}", file=sys.stderr)
+    else:
+        print(content)
+
+
+# ──────────────────────────────────────────────
+Text formatting (human-readable)
 # ──────────────────────────────────────────────
 def format_velocity(delta: int | None) -> str:
     """
-    Render a star delta value as a human-readable velocity badge.
-
-    The returned string is indented with two leading spaces so it aligns
-    with other lines inside :func:`format_repo`.
-
-    Args:
-        delta (int | None):
-            - ``None``  — no previous snapshot exists (first run).
-            - ``int``   — signed star count change since last snapshot.
-              Positive means growth; negative means star loss.
-
-    Returns:
-        str: A single-line velocity string, no trailing newline.
+    Render a star delta as a human-readable velocity badge.
 
     Examples:
         >>> format_velocity(None)
         '  Δ  — (first run — no velocity data yet)'
-
-        >>> format_velocity(0)
-        '  Δ 0 ⭐ since last run'
-
         >>> format_velocity(142)
         '  Δ +142 ⭐ since last run'
-
         >>> format_velocity(-3)
         '  Δ -3 ⭐ since last run'
     """
@@ -373,61 +327,24 @@ def format_velocity(delta: int | None) -> str:
 
 def format_repo(repo: dict, rank: int, snapshots: dict) -> str:
     """
-    Format a single GitHub repo dict into a human-readable display block.
-
-    Produces a multi-line string suitable for printing to the terminal.
-    The velocity line is computed on the fly from the provided snapshot
-    data via :func:`star_delta` and :func:`format_velocity`.
+    Format a single repo dict into a human-readable terminal block.
 
     Args:
-        repo (dict): Repo dict from the GitHub Search API.  Expected keys:
-            - ``full_name``        (str)  — e.g. ``"owner/repo"``
-            - ``stargazers_count`` (int)  — total stars
-            - ``forks_count``      (int)  — total forks
-            - ``language``         (str | None) — primary language
-            - ``description``      (str | None) — short description
-            - ``created_at``       (str)  — ISO 8601 creation timestamp
-            - ``updated_at``       (str)  — ISO 8601 last-update timestamp
-            - ``html_url``         (str)  — browser URL
-        rank (int): 1-based display rank within its category.
-        snapshots (dict): Loaded snapshot data as returned by
-            :func:`load_snapshots`.  Pass ``{}`` to suppress velocity.
+        repo:      repo dict from GitHub API.
+        rank:      1-based display rank within its category.
+        snapshots: loaded snapshot data for velocity calculation.
 
     Returns:
-        str: Multi-line formatted block ending with a trailing newline.
-            Structure::
-
-                ======================================================================
-                #1  owner/repo
-                    Stars: 12,542  Forks: 834  Lang: Python
-                      Δ +142 ⭐ since last run
-                    Created: 2025-03-10  |  Updated: 2026-06-01
-                    A short description (truncated to 80 chars)
-                    https://github.com/owner/repo
-
-    Examples:
-        >>> repo = {
-        ...     "full_name": "owner/repo",
-        ...     "stargazers_count": 12542,
-        ...     "forks_count": 834,
-        ...     "language": "Python",
-        ...     "description": "A test repo",
-        ...     "created_at": "2025-03-10T00:00:00Z",
-        ...     "updated_at": "2026-06-01T00:00:00Z",
-        ...     "html_url": "https://github.com/owner/repo",
-        ... }
-        >>> print(format_repo(repo, 1, {}))   # no snapshot → first-run velocity
+        Multi-line string ending with a trailing newline.
     """
     delta = star_delta(repo, snapshots)
-    velocity_line = format_velocity(delta)
-
     return (
         f"{'=' * 70}\n"
         f"#{rank}  {repo['full_name']}\n"
         f"    Stars: {repo['stargazers_count']:,}  "
         f"Forks: {repo['forks_count']:,}  "
         f"Lang: {repo.get('language') or 'N/A'}\n"
-        f"{velocity_line}\n"
+        f"{format_velocity(delta)}\n"
         f"    Created: {repo['created_at'][:10]}  |  Updated: {repo['updated_at'][:10]}\n"
         f"    {(repo.get('description') or 'No description')[:80]}\n"
         f"    {repo['html_url']}\n"
@@ -435,7 +352,7 @@ def format_repo(repo: dict, rank: int, snapshots: dict) -> str:
 
 
 # ──────────────────────────────────────────────
-# Entry point
+Entry point
 # ──────────────────────────────────────────────
 def find_repo_of_the_day(
     language: str | None = None,
@@ -444,60 +361,49 @@ def find_repo_of_the_day(
     keyword: str | None = None,
     search_in: str = "name,description",
     use_snapshots: bool = True,
+    output_fmt: Literal["text", "json", "csv"] = "text",
+    output_file: str | None = None,
 ) -> None:
     """
-    Fetch, display, and optionally snapshot the top GitHub repos of the day.
+    Fetch, display/export, and optionally snapshot the top repos of the day.
 
-    This is the main orchestrator function called by the CLI.  It:
-
-    1. Prints a session header with active filters and auth status.
-    2. Loads the previous snapshot (if ``use_snapshots`` is ``True``).
-    3. Calls :func:`search_trending_repos` to fetch results.
-    4. Prints each repo via :func:`format_repo`, including velocity.
-    5. Saves a new snapshot baseline (if ``use_snapshots`` is ``True``).
+    Orchestration order:
+      1. Print session header (text mode only).
+      2. Load previous snapshot (if use_snapshots).
+      3. Fetch repos via search_trending_repos().
+      4. Render output in the requested format.
+      5. Save new snapshot baseline (if use_snapshots).
 
     Args:
-        language (str | None): Programming language filter passed through
-            to :func:`search_trending_repos`.  Defaults to ``None``.
-        since_days (int): Number of days to look back.  Defaults to ``1``.
-        top_n (int): Repos per category.  Defaults to ``10``.
-        keyword (str | None): Keyword filter.  Defaults to ``None``.
-        search_in (str): Comma-separated search scope for keyword.
-            Defaults to ``"name,description"``.
-        use_snapshots (bool): When ``True`` (default), load the previous
-            snapshot before fetching and save a new one after.  Set to
-            ``False`` (``--no-snapshot``) to run without any disk I/O.
+        language:    Language filter. Default: None (all languages).
+        since_days:  Days to look back. Default: 1.
+        top_n:       Repos per category. Default: 10.
+        keyword:     Keyword filter. Default: None.
+        search_in:   Search scope for keyword. Default: "name,description".
+        use_snapshots: Load/save velocity snapshots. Default: True.
+        output_fmt:  Output format: "text" (default), "json", or "csv".
+        output_file: Write output to this file path instead of stdout.
+                     Confirmation message is printed to stderr.
 
     Returns:
         None
 
     Raises:
-        SystemExit(1): On any GitHub API error (HTTP, connection, or
-            timeout).  An informative message is printed before exiting.
-
-    Side effects:
-        - Prints to stdout.
-        - Reads from / writes to ``~/.daily-github-pulse/snapshots.json``
-          when ``use_snapshots`` is ``True``.
-
-    Examples:
-        >>> # Programmatic usage (results go to stdout)
-        >>> find_repo_of_the_day(language="python", top_n=5)
-
-        >>> # Disable velocity tracking
-        >>> find_repo_of_the_day(use_snapshots=False)
+        SystemExit(1): On GitHub API errors.
     """
-    print(f"\n{'#' * 70}")
-    print(f"  daily-github-pulse v{VERSION}  —  {date.today().isoformat()}")
-    if language:
-        print(f"  Language : {language}")
-    if keyword:
-        print(f"  Keyword  : '{keyword}'  in [{search_in}]")
-    auth = "Authenticated" if GITHUB_TOKEN else "Unauthenticated (60 req/hr limit)"
-    print(f"  Auth     : {auth}")
-    snap_status = "enabled" if use_snapshots else "disabled (--no-snapshot)"
-    print(f"  Velocity : {snap_status}")
-    print(f"{'#' * 70}\n")
+    # Header is only useful for human readers
+    if output_fmt == "text":
+        print(f"\n{'#' * 70}")
+        print(f"  daily-github-pulse v{VERSION}  —  {date.today().isoformat()}")
+        if language:
+            print(f"  Language : {language}")
+        if keyword:
+            print(f"  Keyword  : '{keyword}'  in [{search_in}]")
+        auth = "Authenticated" if GITHUB_TOKEN else "Unauthenticated (60 req/hr limit)"
+        print(f"  Auth     : {auth}")
+        snap_status = "enabled" if use_snapshots else "disabled (--no-snapshot)"
+        print(f"  Velocity : {snap_status}")
+        print(f"{'#' * 70}\n")
 
     snapshots = load_snapshots() if use_snapshots else {}
 
@@ -510,34 +416,55 @@ def find_repo_of_the_day(
             search_in=search_in,
         )
     except requests.HTTPError as exc:
-        print(f"[ERROR] GitHub API returned: {exc}")
+        print(f"[ERROR] GitHub API returned: {exc}", file=sys.stderr)
         if not GITHUB_TOKEN:
-            print("  Tip: set GITHUB_TOKEN in .env to raise rate limit to 5,000 req/hr.")
+            print("  Tip: set GITHUB_TOKEN in .env to raise rate limit to 5,000 req/hr.",
+                  file=sys.stderr)
         sys.exit(1)
     except requests.ConnectionError:
-        print("[ERROR] Could not reach GitHub API. Check your internet connection.")
+        print("[ERROR] Could not reach GitHub API. Check your internet connection.",
+              file=sys.stderr)
         sys.exit(1)
     except requests.Timeout:
-        print("[ERROR] GitHub API request timed out. Try again in a moment.")
+        print("[ERROR] GitHub API request timed out. Try again in a moment.",
+              file=sys.stderr)
         sys.exit(1)
 
-    for category, repos in all_results.items():
-        print(f"\n{'─' * 70}")
-        print(f"  {category}")
-        print(f"{'─' * 70}")
-        if not repos:
-            print("  No repositories found.\n")
-            continue
-        for i, repo in enumerate(repos, 1):
-            print(format_repo(repo, i, snapshots))
+    # ─ Render output ─────────────────────────────────────────
+    if output_fmt == "text":
+        for category, repos in all_results.items():
+            print(f"\n{'─' * 70}")
+            print(f"  {category}")
+            print(f"{'─' * 70}")
+            if not repos:
+                print("  No repositories found.\n")
+                continue
+            for i, repo in enumerate(repos, 1):
+                print(format_repo(repo, i, snapshots))
 
+    else:
+        # Build flat list of export rows across all categories
+        rows: list[dict] = []
+        for category, repos in all_results.items():
+            for i, repo in enumerate(repos, 1):
+                rows.append(build_export_row(repo, i, category, snapshots))
+
+        if output_fmt == "json":
+            write_output(export_json(rows), output_file, "json")
+        elif output_fmt == "csv":
+            write_output(export_csv(rows), output_file, "csv")
+
+    # ─ Save snapshot ───────────────────────────────────────
     if use_snapshots:
         save_snapshots(all_results)
-        print(f"\n  Snapshot saved → {SNAPSHOT_FILE}")
+        if output_fmt == "text":
+            print(f"\n  Snapshot saved → {SNAPSHOT_FILE}")
+        else:
+            print(f"  Snapshot saved → {SNAPSHOT_FILE}", file=sys.stderr)
 
 
 # ──────────────────────────────────────────────
-# CLI
+CLI
 # ──────────────────────────────────────────────
 if __name__ == "__main__":
     import argparse
@@ -554,24 +481,30 @@ Examples:
   # Top Python repos
   python github_repo_of_the_day.py --language python
 
-  # Search by keyword in name + description
-  python github_repo_of_the_day.py --keyword "LLM agent"
+  # Export as JSON to stdout
+  python github_repo_of_the_day.py --output json
+
+  # Export as CSV to a file
+  python github_repo_of_the_day.py --output csv --output-file results.csv
+
+  # JSON export, pipe into jq
+  python github_repo_of_the_day.py --output json | jq '.[].full_name'
+
+  # Search by keyword
+  python github_repo_of_the_day.py --keyword "LLM agent" --output json
 
   # Search in README too (slower)
-  python github_repo_of_the_day.py --keyword "vector database" --search-in name,description,readme
+  python github_repo_of_the_day.py --keyword "MCP server" --search-in name,description,readme
 
-  # Combine language + keyword + top N
-  python github_repo_of_the_day.py --language python --keyword "agent" --top 5
-
-  # Skip velocity tracking for this run
+  # Skip velocity tracking
   python github_repo_of_the_day.py --no-snapshot
 
-  # Reset all stored snapshots
+  # Reset stored snapshots
   python github_repo_of_the_day.py --clear-snapshots
 
 Token setup:
-  Create a .env file containing:  GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxx
-  Then add .env to .gitignore.
+  Create a .env file:  GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxx
+  Add .env to .gitignore.
   Get a token: https://github.com/settings/tokens
         """,
     )
@@ -585,7 +518,7 @@ Token setup:
     parser.add_argument("--token", "-t", metavar="TOKEN",
                         help="GitHub PAT — overrides .env")
     parser.add_argument("--keyword", "-k", metavar="WORD",
-                        help="Keyword to search (e.g. 'vector database', 'LLM agent')")
+                        help="Keyword to search (e.g. 'LLM agent', 'vector database')")
     parser.add_argument(
         "--search-in", "-s",
         default="name,description",
@@ -597,9 +530,21 @@ Token setup:
         ),
     )
     parser.add_argument(
+        "--output", "-o",
+        choices=["text", "json", "csv"],
+        default="text",
+        metavar="FORMAT",
+        help="Output format: text (default), json, csv",
+    )
+    parser.add_argument(
+        "--output-file", "-f",
+        metavar="FILE",
+        help="Write output to FILE instead of stdout (json/csv only)",
+    )
+    parser.add_argument(
         "--no-snapshot",
         action="store_true",
-        help="Disable snapshot save/load for this run (velocity data will not be shown)",
+        help="Disable snapshot save/load for this run",
     )
     parser.add_argument(
         "--clear-snapshots",
@@ -628,4 +573,6 @@ Token setup:
         keyword=args.keyword,
         search_in=args.search_in,
         use_snapshots=not args.no_snapshot,
+        output_fmt=args.output,
+        output_file=args.output_file,
     )

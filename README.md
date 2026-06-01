@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![GitHub API](https://img.shields.io/badge/GitHub-REST%20API%20v3-black?logo=github)](https://docs.github.com/en/rest)
-[![Version](https://img.shields.io/badge/version-1.2.0-informational)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.3.0-informational)](CHANGELOG.md)
 
 ---
 
@@ -58,7 +58,9 @@ python github_repo_of_the_day.py [OPTIONS]
 | `--top` | `-n` | `10` | Repos per category |
 | `--token` | `-t` | `None` | GitHub PAT — overrides `.env` |
 | `--keyword` | `-k` | `None` | Keyword to search in repo metadata |
-| `--search-in` | `-s` | `name,description` | Where to search the keyword: `name`, `description`, `readme` |
+| `--search-in` | `-s` | `name,description` | Where to search: `name`, `description`, `readme` |
+| `--output` | `-o` | `text` | Output format: `text`, `json`, `csv` |
+| `--output-file` | `-f` | `None` | Write JSON/CSV to file instead of stdout |
 | `--no-snapshot` | | `False` | Skip velocity tracking for this run |
 | `--clear-snapshots` | | — | Delete all stored snapshots and exit |
 | `--version` | | — | Print version and exit |
@@ -66,33 +68,88 @@ python github_repo_of_the_day.py [OPTIONS]
 ### Examples
 
 ```bash
-# Today's top repos, all languages
+# Today's top repos, default text output
 python github_repo_of_the_day.py
 
-# Filter by language
-python github_repo_of_the_day.py --language python
+# Export as JSON to stdout (pipe-friendly)
+python github_repo_of_the_day.py --output json
 
-# Search by keyword in name + description
-python github_repo_of_the_day.py --keyword "LLM agent"
+# Export JSON and pipe into jq
+python github_repo_of_the_day.py --output json | jq '.[].full_name'
 
-# Search in README too (slower)
-python github_repo_of_the_day.py --keyword "vector database" --search-in name,description,readme
+# Save CSV to file
+python github_repo_of_the_day.py --output csv --output-file results.csv
+
+# Python repos, CSV export
+python github_repo_of_the_day.py --language python --output csv --output-file python_today.csv
+
+# Keyword + JSON export
+python github_repo_of_the_day.py --keyword "LLM agent" --output json
 
 # Top 5 Rust repos from the last 7 days
 python github_repo_of_the_day.py --language rust --days 7 --top 5
-
-# Run without saving/loading snapshots
-python github_repo_of_the_day.py --no-snapshot
-
-# Reset all stored velocity data
-python github_repo_of_the_day.py --clear-snapshots
 ```
+
+---
+
+## 📤 Export Formats
+
+### JSON
+
+Outputs a flat JSON array. Each element corresponds to one repo:
+
+```json
+[
+  {
+    "rank": 1,
+    "category": "New Today",
+    "full_name": "owner/repo",
+    "stars": 12542,
+    "star_delta": 142,
+    "forks": 834,
+    "language": "Python",
+    "description": "A blazing fast toolkit",
+    "created_at": "2025-03-10",
+    "updated_at": "2026-06-01",
+    "url": "https://github.com/owner/repo"
+  }
+]
+```
+
+`star_delta` is `null` on the first run (no previous snapshot to compare against).
+
+### CSV
+
+Same fields as JSON, one row per repo. Encoded as **UTF-8 with BOM** so it opens
+correctly in Excel and LibreOffice without manual encoding selection.
+
+```
+rank,category,full_name,stars,star_delta,forks,language,description,created_at,updated_at,url
+1,New Today,owner/repo,12542,142,834,Python,A blazing fast toolkit,2025-03-10,2026-06-01,https://...
+```
+
+### Piping and automation
+
+```bash
+# Feed into jq
+python github_repo_of_the_day.py --output json | jq '[.[] | {name: .full_name, velocity: .star_delta}]'
+
+# Daily cron job — save timestamped CSV
+python github_repo_of_the_day.py --output csv --output-file "pulse_$(date +%F).csv"
+
+# GitHub Actions step
+- run: python github_repo_of_the_day.py --output json --output-file pulse.json
+```
+
+> ℹ️ When writing to a file (`--output-file`), the confirmation line is printed
+> to **stderr** so it never contaminates piped output.
 
 ---
 
 ## ⭐ Star Velocity
 
-GitHub's public API exposes **total star counts only** — not how many stars a repo gained today. `daily-github-pulse` solves this with a simple local snapshot mechanism:
+GitHub's public API exposes **total star counts only** — not daily gain.
+`daily-github-pulse` tracks this locally:
 
 ```
 First run                    Second run (next day)
@@ -101,72 +158,42 @@ Repo X  →  12,400 ⭐  →  saved   Repo X  →  12,542 ⭐
                                  delta = 12,542 − 12,400 = +142 ⭐
 ```
 
-Snapshots are stored in `~/.daily-github-pulse/snapshots.json`. The delta is shown inline for each repo:
-
-```
-#1  trending-dev/awesome-tool
-    Stars: 12,542  Forks: 834  Lang: Python
-    Δ +142 ⭐ since last run
-    Created: 2025-03-10  |  Updated: 2026-06-01
-    ...
-```
-
-On the **first run**, no delta is available yet — it will show:
-```
-    Δ  — (first run — no velocity data yet)
-```
-
-### Snapshot management
+Snapshots: `~/.daily-github-pulse/snapshots.json`
 
 ```bash
-# Skip snapshot for a single run (e.g. in CI or testing)
-python github_repo_of_the_day.py --no-snapshot
-
-# Clear all stored data
-python github_repo_of_the_day.py --clear-snapshots
+python github_repo_of_the_day.py --no-snapshot      # skip this run
+python github_repo_of_the_day.py --clear-snapshots  # reset all data
 ```
 
 ---
 
 ## 🔍 Keyword Search
 
-Use `--keyword` to filter results by a topic or term:
-
 ```bash
 # Matches repos where name or description contains the keyword
 python github_repo_of_the_day.py --keyword "self-hosted"
 
-# Also search inside README files (significantly slower)
+# Also search inside README (significantly slower)
 python github_repo_of_the_day.py --keyword "MCP server" --search-in name,description,readme
 ```
 
-> ⚠️ `readme` search triggers GitHub's full-text index and can take 10–15 seconds.
-> Use it only when name/description search is too narrow.
+> ⚠️ `readme` search can take 10–15 seconds. Use it only when name/description is too narrow.
 
 ---
 
 ## 🔑 GitHub Token (Highly Recommended)
 
-Without authentication the GitHub API allows only **60 requests/hour**.
-With a Personal Access Token (PAT) this increases to **5,000 requests/hour**.
-
-### Setup
+Without a token: **60 req/hr**. With a PAT: **5,000 req/hr**.
 
 1. Go to [github.com/settings/tokens](https://github.com/settings/tokens)
-2. Click **Generate new token (classic)**
-3. Select scope: `public_repo` (read-only is enough)
-4. Create a `.env` file in the project root:
+2. Generate new token (classic), scope: `public_repo`
+3. Create `.env` in project root:
 
 ```
 GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxx
 ```
 
-> ⚠️ Always add `.env` to `.gitignore` before committing:
-> ```bash
-> echo ".env" >> .gitignore
-> ```
-
-The `--token` flag overrides `.env` for a single run.
+> ⚠️ Always add `.env` to `.gitignore`.
 
 ---
 
@@ -174,7 +201,7 @@ The `--token` flag overrides `.env` for a single run.
 
 ```
 ######################################################################
-  daily-github-pulse v1.2.0  —  2026-06-01
+  daily-github-pulse v1.3.0  —  2026-06-01
   Language : python
   Auth     : Authenticated
   Velocity : enabled
@@ -200,9 +227,9 @@ The `--token` flag overrides `.env` for a single run.
 
 ```
 daily-github-pulse/
-├── github_repo_of_the_day.py   # Main CLI script
-├── .env                        # Your GitHub token (never commit this)
-├── .env.example                # Safe template to share
+├── github_repo_of_the_day.py
+├── .env
+├── .env.example
 ├── .gitignore
 ├── requirements.txt
 ├── README.md
@@ -218,36 +245,23 @@ daily-github-pulse/
 ## 📐 How It Works
 
 ```
-┌────────────────────────────────────────────────────────┐
-│                     CLI Arguments                      │
-│  --language  --days  --top  --keyword  --search-in     │
-└──────────────────────────┬─────────────────────────────┘
-                           │
-                           ▼
-               load_snapshots()  ◄── ~/.daily-github-pulse/snapshots.json
-                           │
-                           ▼
-┌────────────────────────────────────────────────────────┐
-│              search_trending_repos()                   │
-│                                                        │
-│  Query 1: created:>=DATE stars:>10  [keyword] [lang]   │
-│  Query 2: pushed:>=DATE stars:>1000 [keyword] [lang]   │
-│                                                        │
-│  Deduplication: repos in both queries → shown once     │
-└──────────────┬─────────────────────┬───────────────────┘
-               │                     │
-               ▼                     ▼
-         New Today             Active Giants
-               │                     │
-               └──────────┬──────────┘
-                          ▼
-              star_delta(repo, snapshots)
-                          │
-                          ▼
-              format_repo() + print
-                          │
-                          ▼
-               save_snapshots()  ──► ~/.daily-github-pulse/snapshots.json
+CLI args
+   │
+   ▼
+load_snapshots()  ◄── ~/.daily-github-pulse/snapshots.json
+   │
+   ▼
+search_trending_repos()
+   ├── New Today
+   └── Active Giants
+        │   (deduplication across categories)
+        ▼
+   output_fmt == "text"  →  format_repo() + print
+   output_fmt == "json"  →  build_export_row() → export_json() → write_output()
+   output_fmt == "csv"   →  build_export_row() → export_csv()  → write_output()
+        │
+        ▼
+save_snapshots()  ──► ~/.daily-github-pulse/snapshots.json
 ```
 
 ---
@@ -255,19 +269,20 @@ daily-github-pulse/
 ## ⚠️ Limitations
 
 - GitHub API has **no official trending endpoint** — activity is approximated
-- **Velocity accuracy** depends on how frequently you run the tool; a bigger gap between runs means a larger (less granular) delta
+- Velocity accuracy depends on run frequency; larger gaps mean coarser deltas
 - Rate limits: 60 req/hr unauthenticated · 5,000 req/hr authenticated
-- `readme` search is significantly slower due to full-text indexing
+- `readme` search is significantly slower (full-text index)
 
 ---
 
 ## 🔮 Roadmap
 
-- [ ] `--output json/csv` — export results for downstream automation
-- [ ] `--period day/week/month` — standardised time window flags
-- [ ] GitHub Actions workflow — scheduled daily runs with Telegram/Slack notify
+- [x] Star velocity via local snapshots
+- [x] `--output json/csv` export
+- [ ] `--period day/week/month` standardised time windows
+- [ ] GitHub Actions workflow + Telegram/Slack notify
 - [ ] PyPI package — `pip install daily-github-pulse`
-- [ ] Topic/category filter — e.g. `--topic ai`, `--topic devops`
+- [ ] Topic/category filter (`--topic ai`, `--topic devops`)
 - [ ] Trending developers (not just repos)
 
 ---

@@ -10,6 +10,27 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.0] - 2026-06-01
+
+### Added
+- **`--output` / `-o`** flag — choose output format: `text` (default), `json`, `csv`.
+- **`--output-file` / `-f`** flag — write JSON or CSV to a file instead of stdout.
+- `build_export_row()` — builds a flat, renamed export record per repo.
+- `export_json()` — serialises rows to a pretty-printed JSON string.
+- `export_csv()` — serialises rows to a CSV string with `utf-8-sig` BOM
+  (opens correctly in Excel / LibreOffice without manual encoding setup).
+- `write_output()` — routes content to file or stdout; confirmation printed to stderr.
+- `EXPORT_FIELDS` constant — defines the canonical ordered column list for exports.
+- `star_delta` field included in all exports (`null` / empty on first run).
+
+### Changed
+- `find_repo_of_the_day()` accepts two new parameters: `output_fmt` and `output_file`.
+- Header and separator lines are suppressed in JSON/CSV mode (written to stderr only).
+- Error messages now always print to stderr (not stdout), so they never contaminate
+  piped JSON/CSV output.
+
+---
+
 ## [1.2.0] - 2026-06-01
 
 ### Added
