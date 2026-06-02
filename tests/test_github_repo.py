@@ -522,3 +522,302 @@ class TestSearchTrendingRepos:
         result = m.search_trending_repos()
         for repos in result.values():
             assert repos == []
+
+
+# ──────────────────────────────────────────────
+# build_keyword_qualifier  (Priority B — multi-keyword boolean search)
+#
+# Contract:
+#   build_keyword_qualifier(
+#       keywords   : list[str],        # one or more terms
+#       keyword_op : str = "AND",      # connector between keywords ("AND" | "OR")
+#       keyword_not: list[str] = [],   # terms to exclude
+#       search_in  : str = "name,description",
+#   ) -> str
+#
+# The function builds the keyword fragment that is appended to the GitHub
+# Search query string.  It does NOT include the time/stars part.
+#
+# Rules:
+#   - Each term is wrapped in double-quotes.
+#   - Terms are joined with " AND " or " OR " (uppercase).
+#   - The joined expression is followed by " in:<search_in>".
+#   - Each keyword_not term is appended as " NOT \"<term>\"".
+#   - Empty keywords list returns empty string "".
+#   - keyword_op is normalised to uppercase and stripped.
+#   - Invalid keyword_op raises ValueError.
+# ──────────────────────────────────────────────
+
+class TestBuildKeywordQualifier:
+    """Unit tests for build_keyword_qualifier().
+
+    All tests call m.build_keyword_qualifier() directly.
+    These tests will FAIL until the function is implemented — that is expected
+    (TDD red phase).
+    """
+
+    # ── single keyword (backward-compat with current --keyword behaviour) ──
+
+    def test_single_keyword_is_quoted(self):
+        result = m.build_keyword_qualifier(["LLM"])
+        assert '"LLM"' in result
+
+    def test_single_multi_word_keyword_is_quoted_as_phrase(self):
+        """Multi-word term must be a single quoted phrase, not two quoted words."""
+        result = m.build_keyword_qualifier(["LLM agent"])
+        assert '"LLM agent"' in result
+        # Must NOT split into two quoted tokens
+        assert '"LLM" "agent"' not in result
+
+    def test_single_keyword_appends_in_scope(self):
+        result = m.build_keyword_qualifier(["LLM"], search_in="name,description")
+        assert "in:name,description" in result
+
+    def test_single_keyword_default_scope_is_name_and_description(self):
+        result = m.build_keyword_qualifier(["MCP"])
+        assert "in:name,description" in result
+
+    # ── multiple keywords with AND (default) ──
+
+    def test_two_keywords_joined_with_and_by_default(self):
+        result = m.build_keyword_qualifier(["LLM", "agent"])
+        assert '"LLM" AND "agent"' in result
+
+    def test_three_keywords_joined_with_and(self):
+        result = m.build_keyword_qualifier(["LLM", "agent", "python"])
+        assert '"LLM" AND "agent" AND "python"' in result
+
+    def test_and_connector_is_explicit(self):
+        result = m.build_keyword_qualifier(["LLM", "agent"], keyword_op="AND")
+        assert " AND " in result
+
+    # ── multiple keywords with OR ──
+
+    def test_two_keywords_joined_with_or(self):
+        result = m.build_keyword_qualifier(["LLM", "GPT"], keyword_op="OR")
+        assert '"LLM" OR "GPT"' in result
+
+    def test_three_keywords_joined_with_or(self):
+        result = m.build_keyword_qualifier(["LLM", "GPT", "Claude"], keyword_op="OR")
+        assert '"LLM" OR "GPT" OR "Claude"' in result
+
+    def test_or_connector_does_not_produce_and(self):
+        result = m.build_keyword_qualifier(["LLM", "GPT"], keyword_op="OR")
+        # The join must use OR, not AND
+        assert '"LLM" AND "GPT"' not in result
+
+    # ── keyword_op normalisation ──
+
+    def test_keyword_op_lowercase_and_accepted(self):
+        result = m.build_keyword_qualifier(["LLM", "agent"], keyword_op="and")
+        assert '"LLM" AND "agent"' in result
+
+    def test_keyword_op_lowercase_or_accepted(self):
+        result = m.build_keyword_qualifier(["LLM", "GPT"], keyword_op="or")
+        assert '"LLM" OR "GPT"' in result
+
+    def test_keyword_op_mixed_case_accepted(self):
+        result = m.build_keyword_qualifier(["LLM", "agent"], keyword_op="And")
+        assert '"LLM" AND "agent"' in result
+
+    def test_keyword_op_with_whitespace_accepted(self):
+        result = m.build_keyword_qualifier(["LLM", "agent"], keyword_op="  AND  ")
+        assert '"LLM" AND "agent"' in result
+
+    def test_invalid_keyword_op_raises_value_error(self):
+        with pytest.raises(ValueError, match="keyword_op"):
+            m.build_keyword_qualifier(["LLM"], keyword_op="XOR")
+
+    def test_invalid_keyword_op_error_mentions_valid_options(self):
+        with pytest.raises(ValueError) as exc_info:
+            m.build_keyword_qualifier(["LLM"], keyword_op="NAND")
+        msg = str(exc_info.value)
+        assert "AND" in msg
+        assert "OR" in msg
+
+    # ── keyword_not (exclusion terms) ──
+
+    def test_single_not_term_excluded(self):
+        result = m.build_keyword_qualifier(["LLM"], keyword_not=["benchmark"])
+        assert 'NOT "benchmark"' in result
+
+    def test_multiple_not_terms_all_excluded(self):
+        result = m.build_keyword_qualifier(["LLM"], keyword_not=["benchmark", "survey"])
+        assert 'NOT "benchmark"' in result
+        assert 'NOT "survey"' in result
+
+    def test_not_terms_appear_after_positive_terms(self):
+        """Exclusions must come after the positive keyword block."""
+        result = m.build_keyword_qualifier(["LLM"], keyword_not=["benchmark"])
+        pos_idx = result.index('"LLM"')
+        not_idx = result.index('NOT "benchmark"')
+        assert pos_idx < not_idx
+
+    def test_not_term_multi_word_is_quoted_as_phrase(self):
+        result = m.build_keyword_qualifier(["LLM"], keyword_not=["large benchmark"])
+        assert 'NOT "large benchmark"' in result
+
+    def test_empty_keyword_not_list_produces_no_not_clause(self):
+        result = m.build_keyword_qualifier(["LLM"], keyword_not=[])
+        assert "NOT" not in result
+
+    # ── combined AND + NOT ──
+
+    def test_and_plus_not(self):
+        result = m.build_keyword_qualifier(
+            ["LLM", "agent"],
+            keyword_op="AND",
+            keyword_not=["benchmark"],
+        )
+        assert '"LLM" AND "agent"' in result
+        assert 'NOT "benchmark"' in result
+
+    def test_or_plus_not(self):
+        result = m.build_keyword_qualifier(
+            ["LLM", "GPT"],
+            keyword_op="OR",
+            keyword_not=["survey"],
+        )
+        assert '"LLM" OR "GPT"' in result
+        assert 'NOT "survey"' in result
+
+    # ── edge cases ──
+
+    def test_empty_keywords_returns_empty_string(self):
+        result = m.build_keyword_qualifier([])
+        assert result == ""
+
+    def test_empty_keywords_with_not_terms_returns_empty_string(self):
+        """If no positive keywords, the whole qualifier is empty.
+        NOT-only queries are too broad and would match everything."""
+        result = m.build_keyword_qualifier([], keyword_not=["benchmark"])
+        assert result == ""
+
+    def test_keyword_with_leading_trailing_spaces_stripped(self):
+        result = m.build_keyword_qualifier(["  LLM  "])
+        assert '"LLM"' in result
+        assert '"  LLM  "' not in result
+
+    def test_in_scope_appears_once_regardless_of_keyword_count(self):
+        """in: qualifier must appear exactly once, not once per keyword."""
+        result = m.build_keyword_qualifier(
+            ["LLM", "GPT", "Claude"],
+            keyword_op="OR",
+            search_in="name,description",
+        )
+        assert result.count("in:name,description") == 1
+
+    def test_invalid_search_in_raises_value_error(self):
+        """Delegates validation to the same VALID_SEARCH_IN set used elsewhere."""
+        with pytest.raises(ValueError, match="Invalid search_in"):
+            m.build_keyword_qualifier(["LLM"], search_in="topics")
+
+
+# ──────────────────────────────────────────────
+# search_trending_repos — multi-keyword integration
+#
+# These tests verify that search_trending_repos() correctly delegates
+# to build_keyword_qualifier() when the new `keywords` / `keyword_op` /
+# `keyword_not` parameters are supplied.
+# ──────────────────────────────────────────────
+
+class TestSearchTrendingReposMultiKeyword:
+    """Integration tests: search_trending_repos() + multi-keyword params."""
+
+    def _repo(self, repo_id: int, name: str) -> dict:
+        return {
+            "id": repo_id,
+            "full_name": name,
+            "stargazers_count": 100,
+            "forks_count": 10,
+            "language": "Python",
+            "description": "",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-06-01T00:00:00Z",
+            "html_url": f"https://github.com/{name}",
+        }
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_two_keywords_and_both_appear_in_query(self, mock_get):
+        """keywords=[LLM, agent] with AND must produce a query containing
+        both terms as quoted tokens joined by AND."""
+        mock_get.return_value = _mock_response([])
+        m.search_trending_repos(keywords=["LLM", "agent"], keyword_op="AND")
+        for call_args in mock_get.call_args_list:
+            query = call_args.kwargs["params"]["q"]
+            assert '"LLM" AND "agent"' in query
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_two_keywords_or_both_appear_in_query(self, mock_get):
+        """keywords=[LLM, GPT] with OR must produce a query containing
+        both terms joined by OR."""
+        mock_get.return_value = _mock_response([])
+        m.search_trending_repos(keywords=["LLM", "GPT"], keyword_op="OR")
+        for call_args in mock_get.call_args_list:
+            query = call_args.kwargs["params"]["q"]
+            assert '"LLM" OR "GPT"' in query
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_keyword_not_produces_not_clause_in_query(self, mock_get):
+        """keyword_not=[benchmark] must add NOT \"benchmark\" to each query."""
+        mock_get.return_value = _mock_response([])
+        m.search_trending_repos(keywords=["LLM"], keyword_not=["benchmark"])
+        for call_args in mock_get.call_args_list:
+            query = call_args.kwargs["params"]["q"]
+            assert 'NOT "benchmark"' in query
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_multi_keyword_triggers_search_mode_categories(self, mock_get):
+        """Providing keywords list (non-empty) must activate search mode:
+        category keys = 'New & Relevant' and 'Active & Relevant'."""
+        mock_get.return_value = _mock_response([self._repo(1, "owner/alpha")])
+        result = m.search_trending_repos(keywords=["LLM", "agent"])
+        assert set(result.keys()) == {"New & Relevant", "Active & Relevant"}
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_multi_keyword_preserves_time_filter(self, mock_get):
+        """created:/pushed: time filter must be present even with multiple keywords."""
+        mock_get.return_value = _mock_response([])
+        m.search_trending_repos(keywords=["LLM", "agent"], since_days=7)
+        for call_args in mock_get.call_args_list:
+            query = call_args.kwargs["params"]["q"]
+            assert "created:>=" in query or "pushed:>=" in query
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_multi_keyword_in_scope_appears_once(self, mock_get):
+        """in: qualifier must appear exactly once per query, not once per keyword."""
+        mock_get.return_value = _mock_response([])
+        m.search_trending_repos(
+            keywords=["LLM", "GPT", "Claude"],
+            keyword_op="OR",
+            search_in="name,description",
+        )
+        for call_args in mock_get.call_args_list:
+            query = call_args.kwargs["params"]["q"]
+            assert query.count("in:name,description") == 1
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_keywords_and_keyword_both_raise_value_error(self, mock_get):
+        """Providing both `keyword` (old param) and `keywords` (new param)
+        simultaneously must raise ValueError to avoid ambiguity."""
+        mock_get.return_value = _mock_response([])
+        with pytest.raises(ValueError, match="keyword.*keywords"):
+            m.search_trending_repos(keyword="LLM", keywords=["LLM", "agent"])
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_empty_keywords_list_falls_back_to_browse_mode(self, mock_get):
+        """keywords=[] (empty list) must behave identically to keyword=None:
+        browse mode, 'New Today' and 'Active Giants' categories."""
+        mock_get.return_value = _mock_response([self._repo(1, "owner/alpha")])
+        result = m.search_trending_repos(keywords=[])
+        assert set(result.keys()) == {"New Today", "Active Giants"}
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_single_item_keywords_list_equivalent_to_keyword(self, mock_get):
+        """keywords=[\"LLM\"] must produce the same query as keyword=\"LLM\"."""
+        mock_get.return_value = _mock_response([])
+        m.search_trending_repos(keywords=["LLM"])
+        for call_args in mock_get.call_args_list:
+            query = call_args.kwargs["params"]["q"]
+            assert '"LLM"' in query
+            assert "in:name,description" in query
