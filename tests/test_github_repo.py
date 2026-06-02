@@ -277,26 +277,39 @@ class TestStarDelta:
 # ──────────────────────────────────────────────
 
 class TestFormatVelocity:
-    def test_none_shows_first_run_message(self):
-        result = m.format_velocity(None)
+    def test_none_delta_shows_first_run_message(self):
+        result = m.format_velocity(None, None)
+        assert "first run" in result
+
+    def test_none_velocity_shows_first_run_message(self):
+        # velocity=None alone also triggers first-run path
+        result = m.format_velocity(None, None)
         assert "first run" in result
 
     def test_positive_delta_shows_plus_sign(self):
-        result = m.format_velocity(142)
+        result = m.format_velocity(142, 71.0)
         assert "+142" in result
 
     def test_zero_delta(self):
-        result = m.format_velocity(0)
+        result = m.format_velocity(0, 0.0)
         assert "⭐" in result
 
     def test_negative_delta_no_plus_sign(self):
-        result = m.format_velocity(-3)
+        result = m.format_velocity(-3, -1.5)
         assert "-3" in result
         assert "+-3" not in result
 
     def test_large_number_uses_comma_separator(self):
-        result = m.format_velocity(10000)
+        result = m.format_velocity(10000, 5000.0)
         assert "10,000" in result
+
+    def test_velocity_shown_in_output(self):
+        result = m.format_velocity(700, 100.0)
+        assert "100.0" in result
+
+    def test_output_contains_per_day(self):
+        result = m.format_velocity(200, 50.0)
+        assert "/day" in result
 
 
 # ──────────────────────────────────────────────
@@ -506,7 +519,6 @@ class TestSearchTrendingRepos:
         with patch("github_repo_of_the_day.requests.get") as mock_get:
             mock_get.return_value = _mock_response([])
             for combo in valid_combos:
-                # Should not raise
                 m.search_trending_repos(keyword="test", search_in=combo)
 
     @patch("github_repo_of_the_day.requests.get")

@@ -66,6 +66,9 @@ PERIOD_DAYS: dict[str, int] = {
     "month": 30,
 }
 
+# Valid tokens for search_in parameter
+VALID_SEARCH_IN_TOKENS = {"name", "description", "readme"}
+
 # Fields included in JSON / CSV exports (in order)
 EXPORT_FIELDS = [
     "rank",
@@ -302,11 +305,13 @@ def search_trending_repos(
     """
     Query the GitHub Search API and return top repositories by category.
 
-    Uses two complementary strategies since GitHub has no official trending
-    endpoint:
+    Browse mode (no keyword):
+      - New Today     — recently created repos with >10 stars.
+      - Active Giants — recently pushed repos with >1000 stars.
 
-    - New Today     — recently created repos with >10 stars (newcomers).
-    - Active Giants — recently pushed repos with >1000 stars (veterans).
+    Search mode (keyword provided):
+      - New & Relevant  — recently created repos with >50 stars matching keyword.
+      - Active & Relevant — recently pushed repos with >500 stars matching keyword.
 
     Repos appearing in both result sets are deduplicated — shown only in
     the first category that returns them.
@@ -325,15 +330,35 @@ def search_trending_repos(
         dict: {category_label: [repo_dict, ...]}
 
     Raises:
+        ValueError: If search_in contains invalid tokens.
         requests.HTTPError, requests.ConnectionError, requests.Timeout
     """
-    since_date = (date.today() - timedelta(days=since_days)).isoformat()
-    keyword_qualifier = f" {keyword} in:{search_in}" if keyword else ""
+    # Validate search_in tokens eagerly so callers get a clear error
+    tokens = {t.strip() for t in search_in.split(",") if t.strip()}
+    invalid = tokens - VALID_SEARCH_IN_TOKENS
+    if invalid:
+        raise ValueError(
+            f"Invalid search_in token(s): {', '.join(sorted(invalid))}. "
+            f"Valid options: {', '.join(sorted(VALID_SEARCH_IN_TOKENS))}"
+        )
 
-    queries = {
-        "New Today": f"created:>={since_date} stars:>10{keyword_qualifier}",
-        "Active Giants": f"pushed:>={since_date} stars:>1000{keyword_qualifier}",
-    }
+    since_date = (date.today() - timedelta(days=since_days)).isoformat()
+
+    if keyword:
+        # Wrap keyword in quotes so GitHub treats it as an exact phrase
+        # and the in: qualifier applies to the entire phrase.
+        quoted = f'"{keyword}"'
+        keyword_qualifier = f" {quoted} in:{search_in}"
+        queries = {
+            "New & Relevant":    f"created:>={since_date} stars:>50{keyword_qualifier}",
+            "Active & Relevant": f"pushed:>={since_date} stars:>500{keyword_qualifier}",
+        }
+    else:
+        queries = {
+            "New Today":     f"created:>={since_date} stars:>10",
+            "Active Giants": f"pushed:>={since_date} stars:>1000",
+        }
+
     if language:
         queries = {k: v + f" language:{language}" for k, v in queries.items()}
 
