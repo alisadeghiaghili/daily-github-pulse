@@ -287,7 +287,7 @@ class TestFormatVelocity:
 
     def test_zero_delta(self):
         result = m.format_velocity(0)
-        assert "⭐" in result
+        assert "\u2b50" in result
 
     def test_negative_delta_no_plus_sign(self):
         result = m.format_velocity(-3)
@@ -549,14 +549,9 @@ class TestSearchTrendingRepos:
 # ──────────────────────────────────────────────
 
 class TestBuildKeywordQualifier:
-    """Unit tests for build_keyword_qualifier().
+    """Unit tests for build_keyword_qualifier()."""
 
-    All tests call m.build_keyword_qualifier() directly.
-    These tests will FAIL until the function is implemented — that is expected
-    (TDD red phase).
-    """
-
-    # ── single keyword (backward-compat with current --keyword behaviour) ──
+    # ── single keyword ──
 
     def test_single_keyword_is_quoted(self):
         result = m.build_keyword_qualifier(["LLM"])
@@ -566,7 +561,6 @@ class TestBuildKeywordQualifier:
         """Multi-word term must be a single quoted phrase, not two quoted words."""
         result = m.build_keyword_qualifier(["LLM agent"])
         assert '"LLM agent"' in result
-        # Must NOT split into two quoted tokens
         assert '"LLM" "agent"' not in result
 
     def test_single_keyword_appends_in_scope(self):
@@ -603,7 +597,6 @@ class TestBuildKeywordQualifier:
 
     def test_or_connector_does_not_produce_and(self):
         result = m.build_keyword_qualifier(["LLM", "GPT"], keyword_op="OR")
-        # The join must use OR, not AND
         assert '"LLM" AND "GPT"' not in result
 
     # ── keyword_op normalisation ──
@@ -715,10 +708,6 @@ class TestBuildKeywordQualifier:
 
 # ──────────────────────────────────────────────
 # search_trending_repos — multi-keyword integration
-#
-# These tests verify that search_trending_repos() correctly delegates
-# to build_keyword_qualifier() when the new `keywords` / `keyword_op` /
-# `keyword_not` parameters are supplied.
 # ──────────────────────────────────────────────
 
 class TestSearchTrendingReposMultiKeyword:
@@ -739,8 +728,6 @@ class TestSearchTrendingReposMultiKeyword:
 
     @patch("github_repo_of_the_day.requests.get")
     def test_two_keywords_and_both_appear_in_query(self, mock_get):
-        """keywords=[LLM, agent] with AND must produce a query containing
-        both terms as quoted tokens joined by AND."""
         mock_get.return_value = _mock_response([])
         m.search_trending_repos(keywords=["LLM", "agent"], keyword_op="AND")
         for call_args in mock_get.call_args_list:
@@ -749,8 +736,6 @@ class TestSearchTrendingReposMultiKeyword:
 
     @patch("github_repo_of_the_day.requests.get")
     def test_two_keywords_or_both_appear_in_query(self, mock_get):
-        """keywords=[LLM, GPT] with OR must produce a query containing
-        both terms joined by OR."""
         mock_get.return_value = _mock_response([])
         m.search_trending_repos(keywords=["LLM", "GPT"], keyword_op="OR")
         for call_args in mock_get.call_args_list:
@@ -759,7 +744,6 @@ class TestSearchTrendingReposMultiKeyword:
 
     @patch("github_repo_of_the_day.requests.get")
     def test_keyword_not_produces_not_clause_in_query(self, mock_get):
-        """keyword_not=[benchmark] must add NOT \"benchmark\" to each query."""
         mock_get.return_value = _mock_response([])
         m.search_trending_repos(keywords=["LLM"], keyword_not=["benchmark"])
         for call_args in mock_get.call_args_list:
@@ -768,15 +752,12 @@ class TestSearchTrendingReposMultiKeyword:
 
     @patch("github_repo_of_the_day.requests.get")
     def test_multi_keyword_triggers_search_mode_categories(self, mock_get):
-        """Providing keywords list (non-empty) must activate search mode:
-        category keys = 'New & Relevant' and 'Active & Relevant'."""
         mock_get.return_value = _mock_response([self._repo(1, "owner/alpha")])
         result = m.search_trending_repos(keywords=["LLM", "agent"])
         assert set(result.keys()) == {"New & Relevant", "Active & Relevant"}
 
     @patch("github_repo_of_the_day.requests.get")
     def test_multi_keyword_preserves_time_filter(self, mock_get):
-        """created:/pushed: time filter must be present even with multiple keywords."""
         mock_get.return_value = _mock_response([])
         m.search_trending_repos(keywords=["LLM", "agent"], since_days=7)
         for call_args in mock_get.call_args_list:
@@ -785,7 +766,6 @@ class TestSearchTrendingReposMultiKeyword:
 
     @patch("github_repo_of_the_day.requests.get")
     def test_multi_keyword_in_scope_appears_once(self, mock_get):
-        """in: qualifier must appear exactly once per query, not once per keyword."""
         mock_get.return_value = _mock_response([])
         m.search_trending_repos(
             keywords=["LLM", "GPT", "Claude"],
@@ -798,23 +778,18 @@ class TestSearchTrendingReposMultiKeyword:
 
     @patch("github_repo_of_the_day.requests.get")
     def test_keywords_and_keyword_both_raise_value_error(self, mock_get):
-        """Providing both `keyword` (old param) and `keywords` (new param)
-        simultaneously must raise ValueError to avoid ambiguity."""
         mock_get.return_value = _mock_response([])
         with pytest.raises(ValueError, match="keyword.*keywords"):
             m.search_trending_repos(keyword="LLM", keywords=["LLM", "agent"])
 
     @patch("github_repo_of_the_day.requests.get")
     def test_empty_keywords_list_falls_back_to_browse_mode(self, mock_get):
-        """keywords=[] (empty list) must behave identically to keyword=None:
-        browse mode, 'New Today' and 'Active Giants' categories."""
         mock_get.return_value = _mock_response([self._repo(1, "owner/alpha")])
         result = m.search_trending_repos(keywords=[])
         assert set(result.keys()) == {"New Today", "Active Giants"}
 
     @patch("github_repo_of_the_day.requests.get")
     def test_single_item_keywords_list_equivalent_to_keyword(self, mock_get):
-        """keywords=[\"LLM\"] must produce the same query as keyword=\"LLM\"."""
         mock_get.return_value = _mock_response([])
         m.search_trending_repos(keywords=["LLM"])
         for call_args in mock_get.call_args_list:
