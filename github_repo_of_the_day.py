@@ -582,7 +582,7 @@ def write_output(content: str, output_file: str | None, fmt: str) -> None:
 # ──────────────────────────────────────────────
 # Text formatting (human-readable)
 # ──────────────────────────────────────────────
-def format_velocity(delta: int | None, velocity: float | None) -> str:
+def format_velocity(delta: int | None, velocity: float | None = None) -> str:
     """
     Render star delta and daily velocity as a human-readable badge.
 
@@ -592,7 +592,8 @@ def format_velocity(delta: int | None, velocity: float | None) -> str:
 
     Args:
         delta:    Raw star delta from ``star_delta()``.
-        velocity: Stars-per-day from ``daily_velocity()``.
+        velocity: Stars-per-day from ``daily_velocity()``. Optional;
+                  when omitted or None, only the delta is shown.
 
     Returns:
         Single-line string starting with two spaces.
@@ -604,10 +605,14 @@ def format_velocity(delta: int | None, velocity: float | None) -> str:
         '  Δ +700 ⭐ total  |  ~100.0 ⭐/day'
         >>> format_velocity(0, 0.0)
         '  Δ 0 ⭐ total  |  ~0.0 ⭐/day'
+        >>> format_velocity(142)
+        '  Δ +142 ⭐'
     """
-    if delta is None or velocity is None:
+    if delta is None:
         return "  Δ  — (first run — no velocity data yet)"
     sign = "+" if delta > 0 else ""
+    if velocity is None:
+        return f"  Δ {sign}{delta:,} ⭐"
     return f"  Δ {sign}{delta:,} ⭐ total  |  ~{velocity:,} ⭐/day"
 
 
