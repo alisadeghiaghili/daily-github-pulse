@@ -387,12 +387,72 @@ class TestSearchTrendingRepos:
             assert "language:rust" in query
 
     @patch("github_repo_of_the_day.requests.get")
-    def test_keyword_appended_to_query(self, mock_get):
+    def test_keyword_single_word_quoted_in_query(self, mock_get):
+        """Single-word keyword must appear quoted so in: scope is unambiguous."""
         mock_get.return_value = _mock_response([])
         m.search_trending_repos(keyword="LLM")
         for call_args in mock_get.call_args_list:
             query = call_args.kwargs["params"]["q"]
-            assert "LLM" in query
+            assert '"LLM"' in query
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_keyword_multi_word_quoted_in_query(self, mock_get):
+        """Multi-word phrase must be wrapped in quotes so GitHub Search
+        treats it as an exact phrase and in: applies to the whole phrase."""
+        mock_get.return_value = _mock_response([])
+        m.search_trending_repos(keyword="LLM agent")
+        for call_args in mock_get.call_args_list:
+            query = call_args.kwargs["params"]["q"]
+            assert '"LLM agent"' in query
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_keyword_includes_in_scope(self, mock_get):
+        """search_in value must appear as in:<scope> after the quoted keyword."""
+        mock_get.return_value = _mock_response([])
+        m.search_trending_repos(keyword="MCP", search_in="name,description")
+        for call_args in mock_get.call_args_list:
+            query = call_args.kwargs["params"]["q"]
+            assert "in:name,description" in query
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_no_keyword_produces_no_in_qualifier(self, mock_get):
+        """When keyword is None, the query must not contain an in: qualifier."""
+        mock_get.return_value = _mock_response([])
+        m.search_trending_repos(keyword=None)
+        for call_args in mock_get.call_args_list:
+            query = call_args.kwargs["params"]["q"]
+            assert " in:" not in query
+
+    def test_invalid_search_in_raises_value_error(self):
+        """Tokens outside {name, description, readme} must fail immediately."""
+        with pytest.raises(ValueError, match="Invalid search_in"):
+            m.search_trending_repos(keyword="test", search_in="topics")
+
+    def test_invalid_search_in_error_lists_valid_options(self):
+        """The ValueError message must name all valid tokens."""
+        with pytest.raises(ValueError) as exc_info:
+            m.search_trending_repos(keyword="test", search_in="xyz,topics")
+        msg = str(exc_info.value)
+        assert "name" in msg
+        assert "description" in msg
+        assert "readme" in msg
+
+    def test_valid_search_in_tokens_do_not_raise(self):
+        """All three valid tokens, alone or combined, must not raise."""
+        valid_combos = [
+            "name",
+            "description",
+            "readme",
+            "name,description",
+            "name,readme",
+            "description,readme",
+            "name,description,readme",
+        ]
+        with patch("github_repo_of_the_day.requests.get") as mock_get:
+            mock_get.return_value = _mock_response([])
+            for combo in valid_combos:
+                # Should not raise
+                m.search_trending_repos(keyword="test", search_in=combo)
 
     @patch("github_repo_of_the_day.requests.get")
     def test_http_error_propagates(self, mock_get):

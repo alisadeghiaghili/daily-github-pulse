@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-daily-github-pulse  v1.6.0
+daily-github-pulse  v1.6.1
 ──────────────────────────
 Discover GitHub's top repositories AND developers of the day — with real star velocity.
 
@@ -53,7 +53,7 @@ except ImportError:
 # ──────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 SNAPSHOT_DIR = Path.home() / ".daily-github-pulse"
 SNAPSHOT_FILE = SNAPSHOT_DIR / "snapshots.json"
 
@@ -65,6 +65,9 @@ PERIOD_DAYS: dict[str, int] = {
     "week":  7,
     "month": 30,
 }
+
+# Valid tokens for the --search-in / search_in parameter
+VALID_SEARCH_IN = {"name", "description", "readme"}
 
 # Fields included in JSON / CSV exports (in order)
 EXPORT_FIELDS = [
@@ -311,24 +314,47 @@ def search_trending_repos(
     Repos appearing in both result sets are deduplicated — shown only in
     the first category that returns them.
 
+    Keyword quoting
+    ───────────────
+    The keyword is wrapped in double-quotes before being appended to the
+    query string.  This ensures multi-word phrases (e.g. ``"LLM agent"``)
+    are treated as an exact phrase by GitHub Search rather than two
+    independent terms where only the last token inherits the ``in:`` scope
+    qualifier.
+
     Args:
         language:   Optional language filter (e.g. "python", "rust").
         since_days: Days to look back (default: 1 = today).
         top_n:      Max results per category; GitHub hard limit is 100.
         keyword:    Optional keyword to match against repo metadata.
         search_in:  Comma-separated search scope for keyword.
-                    Valid tokens: "name", "description", "readme".
-                    Default: "name,description".
-                    Warning: "readme" is significantly slower.
+                    Valid tokens: ``"name"``, ``"description"``, ``"readme"``.
+                    Default: ``"name,description"``.
+                    Warning: ``"readme"`` is significantly slower.
 
     Returns:
         dict: {category_label: [repo_dict, ...]}
 
     Raises:
+        ValueError: If any token in ``search_in`` is not one of
+                    ``name``, ``description``, ``readme``.
         requests.HTTPError, requests.ConnectionError, requests.Timeout
     """
+    # Validate search_in tokens up-front so invalid values fail fast
+    # instead of silently producing unrelated results from the API.
+    tokens = {t.strip() for t in search_in.split(",") if t.strip()}
+    invalid = tokens - VALID_SEARCH_IN
+    if invalid:
+        raise ValueError(
+            f"Invalid search_in value(s): {sorted(invalid)}. "
+            f"Valid options: {sorted(VALID_SEARCH_IN)}"
+        )
+
     since_date = (date.today() - timedelta(days=since_days)).isoformat()
-    keyword_qualifier = f" {keyword} in:{search_in}" if keyword else ""
+    # Wrap in double-quotes: multi-word phrases like "LLM agent" must be
+    # quoted so GitHub Search treats them as a phrase and the in: qualifier
+    # applies to the whole phrase, not just the last token.
+    keyword_qualifier = f' "{keyword}" in:{search_in}' if keyword else ""
 
     queries = {
         "New Today": f"created:>={since_date} stars:>10{keyword_qualifier}",
