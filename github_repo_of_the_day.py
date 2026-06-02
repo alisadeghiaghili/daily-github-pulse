@@ -37,6 +37,7 @@ import csv
 import io
 import json
 import os
+import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -151,6 +152,71 @@ def resolve_period(period: str | None, days: int) -> int:
 
 
 # ──────────────────────────────────────────────
+# Boolean keyword parser
+# ──────────────────────────────────────────────
+def parse_boolean_query(expr: str) -> str:
+    """
+    Translate a human-readable boolean expression to GitHub Search syntax.
+
+    GitHub Search API supports a limited boolean syntax:
+      - Implicit AND between adjacent terms
+      - Native ``OR`` operator
+      - ``-term`` for NOT
+      - No parentheses (not supported by the API)
+
+    Transformation rules applied in order:
+      1. Parentheses are stripped (unsupported by GitHub Search).
+      2. ``NOT <term>`` or ``-<term>`` → ``-term`` prefix.
+      3. ``AND`` (explicit) → removed; adjacent terms are implicit AND.
+      4. ``OR`` → kept as-is (native GitHub operator).
+      5. Multi-word bare phrases are quoted automatically.
+      6. Excess whitespace is collapsed.
+
+    Args:
+        expr: Boolean expression string, e.g.
+              ``"(LLM OR GPT) AND agent AND NOT benchmark"``.
+
+    Returns:
+        GitHub Search query fragment, e.g.
+        ``"LLM OR GPT agent -benchmark"``.
+
+    Raises:
+        ValueError: If ``expr`` is empty or whitespace-only.
+
+    Examples:
+        >>> parse_boolean_query('LLM AND agent')
+        'LLM agent'
+        >>> parse_boolean_query('LLM OR GPT')
+        'LLM OR GPT'
+        >>> parse_boolean_query('agent AND NOT benchmark')
+        'agent -benchmark'
+        >>> parse_boolean_query('(LLM OR GPT) AND agent AND NOT benchmark')
+        'LLM OR GPT agent -benchmark'
+    """
+    if not expr or not expr.strip():
+        raise ValueError("Boolean expression must not be empty.")
+
+    s = expr.strip()
+
+    # 1. Remove parentheses
+    s = s.replace("(", " ").replace(")", " ")
+
+    # 2. NOT <term> → -term  (handles both "NOT word" and "NOT \"phrase\"")
+    s = re.sub(r'\bNOT\s+("[^"]+"|\S+)', lambda m: f"-{m.group(1)}", s)
+
+    # 3. Remove explicit AND (GitHub implicitly ANDs adjacent terms)
+    s = re.sub(r'\bAND\b', ' ', s)
+
+    # 4. Preserve OR as-is (native GitHub operator)
+    # Nothing to do — OR stays.
+
+    # 5. Collapse whitespace
+    s = re.sub(r'\s+', ' ', s).strip()
+
+    return s
+
+
+# ──────────────────────────────────────────────
 # Snapshot helpers
 # ──────────────────────────────────────────────
 def load_snapshots() -> dict:
@@ -219,9 +285,6 @@ def elapsed_days(snapshots: dict, full_name: str) -> float | None:
     """
     Return the number of days elapsed since the snapshot was saved.
 
-    Parses the ``saved_at`` ISO timestamp stored in the snapshot entry and
-    computes the difference against the current UTC time.
-
     Args:
         snapshots:  loaded snapshot data (from ``load_snapshots()``).
         full_name:  repository full name, e.g. ``"owner/repo"``.
@@ -230,15 +293,6 @@ def elapsed_days(snapshots: dict, full_name: str) -> float | None:
         Elapsed time in fractional days (always > 0), or ``None`` if the
         repo has no snapshot entry or the ``saved_at`` field is missing /
         unparseable.
-
-    Examples:
-        >>> import json
-        >>> from datetime import datetime, timezone, timedelta
-        >>> ts = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
-        >>> snaps = {"owner/repo": {"stars": 100, "saved_at": ts}}
-        >>> days = elapsed_days(snaps, "owner/repo")
-        >>> 0.4 < days < 0.6  # roughly 0.5 day
-        True
     """
     entry = snapshots.get(full_name)
     if entry is None:
@@ -261,11 +315,6 @@ def daily_velocity(repo: dict, snapshots: dict) -> float | None:
     """
     Compute the time-normalised star growth rate in stars per day.
 
-    Unlike ``star_delta()``, this value stays meaningful regardless of how
-    long ago the snapshot was taken.  A repo that gained 1 400 stars over
-    14 days reports a ``daily_velocity`` of 100.0, the same as a repo that
-    gained 100 stars today.
-
     Args:
         repo:      repo dict from GitHub API.
         snapshots: loaded snapshot data.
@@ -273,15 +322,6 @@ def daily_velocity(repo: dict, snapshots: dict) -> float | None:
     Returns:
         Stars per day rounded to one decimal place, or ``None`` when no
         previous snapshot exists for this repo (first run).
-
-    Examples:
-        >>> import json
-        >>> from datetime import datetime, timezone, timedelta
-        >>> ts = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-        >>> snaps = {"owner/repo": {"stars": 12400, "saved_at": ts}}
-        >>> repo = {"full_name": "owner/repo", "stargazers_count": 13100}
-        >>> daily_velocity(repo, snaps)
-        100.0
     """
     delta = star_delta(repo, snapshots)
     if delta is None:
@@ -300,6 +340,8 @@ def search_trending_repos(
     since_days: int = 1,
     top_n: int = 10,
     keyword: str | None = None,
+    keywords: list[str] | None = None,
+    keyword_op: str = "AND",
     search_in: str = "name,description",
 ) -> dict:
     """
@@ -309,30 +351,48 @@ def search_trending_repos(
       - New Today     — recently created repos with >10 stars.
       - Active Giants — recently pushed repos with >1000 stars.
 
-    Search mode (keyword provided):
+    Search mode (keyword or keywords provided):
       - New & Relevant  — recently created repos with >50 stars matching keyword.
       - Active & Relevant — recently pushed repos with >500 stars matching keyword.
+
+    Keyword resolution priority:
+      1. If ``keywords`` list is provided, terms are joined with ``keyword_op``
+         (``AND`` = implicit adjacency, ``OR`` = GitHub OR operator).
+      2. If a single ``keyword`` string contains boolean operators
+         (AND / OR / NOT / parentheses), it is parsed via
+         ``parse_boolean_query()`` automatically.
+      3. Plain single ``keyword`` is quoted as an exact phrase.
 
     Repos appearing in both result sets are deduplicated — shown only in
     the first category that returns them.
 
     Args:
-        language:   Optional language filter (e.g. "python", "rust").
-        since_days: Days to look back (default: 1 = today).
-        top_n:      Max results per category; GitHub hard limit is 100.
-        keyword:    Optional keyword to match against repo metadata.
-        search_in:  Comma-separated search scope for keyword.
-                    Valid tokens: "name", "description", "readme".
-                    Default: "name,description".
-                    Warning: "readme" is significantly slower.
+        language:    Optional language filter (e.g. "python", "rust").
+        since_days:  Days to look back (default: 1 = today).
+        top_n:       Max results per category; GitHub hard limit is 100.
+        keyword:     Single keyword or boolean expression string.
+        keywords:    List of keywords for multi-keyword mode.
+        keyword_op:  Operator joining ``keywords`` list: "AND" or "OR".
+                     Default: "AND".
+        search_in:   Comma-separated search scope for keyword.
+                     Valid tokens: "name", "description", "readme".
+                     Default: "name,description".
 
     Returns:
         dict: {category_label: [repo_dict, ...]}
 
     Raises:
-        ValueError: If search_in contains invalid tokens.
+        ValueError: If search_in contains invalid tokens, or keyword_op
+                    is not AND/OR.
         requests.HTTPError, requests.ConnectionError, requests.Timeout
     """
+    # Validate keyword_op
+    op_upper = keyword_op.strip().upper()
+    if op_upper not in ("AND", "OR"):
+        raise ValueError(
+            f"Invalid keyword_op '{keyword_op}'. Valid options: AND, OR"
+        )
+
     # Validate search_in tokens eagerly so callers get a clear error
     tokens = {t.strip() for t in search_in.split(",") if t.strip()}
     invalid = tokens - VALID_SEARCH_IN_TOKENS
@@ -344,11 +404,30 @@ def search_trending_repos(
 
     since_date = (date.today() - timedelta(days=since_days)).isoformat()
 
-    if keyword:
-        # Wrap keyword in quotes so GitHub treats it as an exact phrase
-        # and the in: qualifier applies to the entire phrase.
-        quoted = f'"{keyword}"'
-        keyword_qualifier = f" {quoted} in:{search_in}"
+    # ── Build keyword qualifier ──────────────────────────────────────────
+    keyword_qualifier = ""
+
+    if keywords and len(keywords) > 0:
+        # Multi-keyword mode: join list with operator
+        if op_upper == "OR":
+            joined = " OR ".join(f'"{k}"' if " " not in k else f'"{k}"' for k in keywords)
+        else:  # AND — implicit adjacency
+            joined = " ".join(f'"{k}"' if " " not in k else f'"{k}"' for k in keywords)
+        keyword_qualifier = f" {joined} in:{search_in}"
+
+    elif keyword:
+        _BOOL_PATTERN = re.compile(r'\b(AND|OR|NOT)\b|[()]')
+        if _BOOL_PATTERN.search(keyword):
+            # Boolean expression — parse and use as-is (no extra quoting)
+            parsed = parse_boolean_query(keyword)
+            keyword_qualifier = f" {parsed} in:{search_in}"
+        else:
+            # Plain keyword / phrase — wrap in quotes
+            quoted = f'"{keyword}"'
+            keyword_qualifier = f" {quoted} in:{search_in}"
+
+    # ── Build queries by category ────────────────────────────────────────
+    if keyword_qualifier:
         queries = {
             "New & Relevant":    f"created:>={since_date} stars:>50{keyword_qualifier}",
             "Active & Relevant": f"pushed:>={since_date} stars:>500{keyword_qualifier}",
@@ -392,31 +471,13 @@ def search_trending_developers(
     """
     Query the GitHub Search API and return top active developers.
 
-    Since GitHub has no official trending-developers endpoint, two
-    complementary user-search strategies are used:
-
-    - Rising Stars    — accounts created recently with public repos
-                        (``created:>=<date> repos:>0 followers:>0``).
-    - Active Veterans — established developers recently active in repos
-                        with high follower counts (``followers:>100``).
-
-    Duplicate logins are removed — each developer is shown once.
-    For each returned login, one extra GET request is made to
-    ``/users/{login}`` to enrich the result with name, company, location,
-    public_repos, followers, and following counts.
-
     Args:
-        language:   Optional language filter applied as
-                    ``language:{language}`` to narrow results to devs
-                    active in that ecosystem.
-        since_days: Days to look back for the "Rising Stars" query
-                    (default: 1 = today).
-        top_n:      Max developers to return (default: 10).
+        language:   Optional language filter.
+        since_days: Days to look back for the "Rising Stars" query.
+        top_n:      Max developers to return.
 
     Returns:
-        list of enriched user dicts, each containing at minimum:
-        ``login``, ``name``, ``company``, ``location``,
-        ``public_repos``, ``followers``, ``following``, ``html_url``.
+        list of enriched user dicts.
 
     Raises:
         requests.HTTPError, requests.ConnectionError, requests.Timeout
@@ -454,7 +515,6 @@ def search_trending_developers(
             if len(raw_users) >= top_n:
                 break
 
-    # Enrich each user with full profile details
     enriched: list[dict] = []
     for user in raw_users[:top_n]:
         try:
@@ -466,7 +526,6 @@ def search_trending_developers(
             detail_resp.raise_for_status()
             enriched.append(detail_resp.json())
         except requests.RequestException:
-            # Fall back to basic search result if detail fetch fails
             enriched.append(user)
 
     return enriched
@@ -476,22 +535,6 @@ def search_trending_developers(
 # Export helpers — repositories
 # ──────────────────────────────────────────────
 def build_export_row(repo: dict, rank: int, category: str, snapshots: dict) -> dict:
-    """
-    Build a flat export record from a repo dict.
-
-    Extracts and renames the fields defined in EXPORT_FIELDS.
-    ``star_delta`` and ``daily_velocity`` are ``null`` / empty string on
-    the first run (no previous snapshot exists).
-
-    Args:
-        repo:      repo dict from GitHub API.
-        rank:      1-based rank within its category.
-        category:  category label (e.g. "New Today").
-        snapshots: loaded snapshot data.
-
-    Returns:
-        Ordered dict suitable for JSON serialisation or csv.DictWriter.
-    """
     delta = star_delta(repo, snapshots)
     velocity = daily_velocity(repo, snapshots)
     return {
@@ -514,18 +557,6 @@ def build_export_row(repo: dict, rank: int, category: str, snapshots: dict) -> d
 # Export helpers — developers
 # ──────────────────────────────────────────────
 def build_dev_export_row(user: dict, rank: int) -> dict:
-    """
-    Build a flat export record from an enriched user dict.
-
-    Fields are defined in DEV_EXPORT_FIELDS.
-
-    Args:
-        user: enriched user dict from search_trending_developers().
-        rank: 1-based display rank.
-
-    Returns:
-        Ordered dict suitable for JSON serialisation or csv.DictWriter.
-    """
     return {
         "rank":         rank,
         "login":        user.get("login") or "",
@@ -540,39 +571,10 @@ def build_dev_export_row(user: dict, rank: int) -> dict:
 
 
 def export_json(rows: list[dict]) -> str:
-    """
-    Serialise export rows to a JSON string.
-
-    Args:
-        rows: list of dicts as returned by build_export_row() or
-              build_dev_export_row().
-
-    Returns:
-        Pretty-printed JSON string (2-space indent, ensure_ascii=False).
-    """
     return json.dumps(rows, indent=2, ensure_ascii=False)
 
 
 def export_csv(rows: list[dict], fieldnames: list[str]) -> str:
-    """
-    Serialise export rows to a CSV string.
-
-    Uses the standard ``csv`` module with ``utf-8-sig`` BOM encoding so
-    the file opens correctly in Excel and LibreOffice without manual
-    encoding selection.
-
-    ``None`` values (star_delta / daily_velocity on first run) are written
-    as empty strings.
-
-    Args:
-        rows:       list of dicts as returned by build_export_row() or
-                    build_dev_export_row().
-        fieldnames: ordered list of column names (EXPORT_FIELDS or
-                    DEV_EXPORT_FIELDS).
-
-    Returns:
-        CSV string with header row and one data row per entry.
-    """
     buf = io.StringIO()
     writer = csv.DictWriter(
         buf,
@@ -587,15 +589,6 @@ def export_csv(rows: list[dict], fieldnames: list[str]) -> str:
 
 
 def write_output(content: str, output_file: str | None, fmt: str) -> None:
-    """
-    Write export content to a file or stdout.
-
-    Args:
-        content:     String content to write (JSON or CSV).
-        output_file: File path string, or None to write to stdout.
-        fmt:         Format label used only in the confirmation message
-                     when writing to a file ("json" or "csv").
-    """
     if output_file:
         encoding = "utf-8-sig" if fmt == "csv" else "utf-8"
         Path(output_file).write_text(content, encoding=encoding)
@@ -610,17 +603,6 @@ def write_output(content: str, output_file: str | None, fmt: str) -> None:
 def format_velocity(delta: int | None, velocity: float | None) -> str:
     """
     Render star delta and daily velocity as a human-readable badge.
-
-    Shows both the raw delta (total stars gained since last snapshot) and
-    the time-normalised rate (stars per day), so the number stays
-    meaningful even when the tool hasn't been run for days or weeks.
-
-    Args:
-        delta:    Raw star delta from ``star_delta()``.
-        velocity: Stars-per-day from ``daily_velocity()``.
-
-    Returns:
-        Single-line string starting with two spaces.
 
     Examples:
         >>> format_velocity(None, None)
@@ -637,17 +619,6 @@ def format_velocity(delta: int | None, velocity: float | None) -> str:
 
 
 def format_repo(repo: dict, rank: int, snapshots: dict) -> str:
-    """
-    Format a single repo dict into a human-readable terminal block.
-
-    Args:
-        repo:      repo dict from GitHub API.
-        rank:      1-based display rank within its category.
-        snapshots: loaded snapshot data for velocity calculation.
-
-    Returns:
-        Multi-line string ending with a trailing newline.
-    """
     delta = star_delta(repo, snapshots)
     velocity = daily_velocity(repo, snapshots)
     return (
@@ -664,16 +635,6 @@ def format_repo(repo: dict, rank: int, snapshots: dict) -> str:
 
 
 def format_developer(user: dict, rank: int) -> str:
-    """
-    Format a single enriched user dict into a human-readable terminal block.
-
-    Args:
-        user: enriched user dict from search_trending_developers().
-        rank: 1-based display rank.
-
-    Returns:
-        Multi-line string ending with a trailing newline.
-    """
     name = user.get("name") or user.get("login", "")
     company = (user.get("company") or "").strip().lstrip("@")
     location = user.get("location") or "N/A"
@@ -699,44 +660,21 @@ def find_repo_of_the_day(
     since_days: int = 1,
     top_n: int = 10,
     keyword: str | None = None,
+    keywords: list[str] | None = None,
+    keyword_op: str = "AND",
     search_in: str = "name,description",
     use_snapshots: bool = True,
     output_fmt: Literal["text", "json", "csv"] = "text",
     output_file: str | None = None,
 ) -> None:
-    """
-    Fetch, display/export, and optionally snapshot the top repos of the day.
-
-    Orchestration order:
-      1. Print session header (text mode only).
-      2. Load previous snapshot (if use_snapshots).
-      3. Fetch repos via search_trending_repos().
-      4. Render output in the requested format.
-      5. Save new snapshot baseline (if use_snapshots).
-
-    Args:
-        language:    Language filter. Default: None (all languages).
-        since_days:  Days to look back. Default: 1.
-        top_n:       Repos per category. Default: 10.
-        keyword:     Keyword filter. Default: None.
-        search_in:   Search scope for keyword. Default: "name,description".
-        use_snapshots: Load/save velocity snapshots. Default: True.
-        output_fmt:  Output format: "text" (default), "json", or "csv".
-        output_file: Write output to this file path instead of stdout.
-                     Confirmation message is printed to stderr.
-
-    Returns:
-        None
-
-    Raises:
-        SystemExit(1): On GitHub API errors.
-    """
     if output_fmt == "text":
         print(f"\n{'#' * 70}")
         print(f"  daily-github-pulse v{VERSION}  —  {date.today().isoformat()}")
         if language:
             print(f"  Language : {language}")
-        if keyword:
+        if keywords:
+            print(f"  Keywords : {keywords}  op=[{keyword_op}]  in=[{search_in}]")
+        elif keyword:
             print(f"  Keyword  : '{keyword}'  in [{search_in}]")
         auth = "Authenticated" if GITHUB_TOKEN else "Unauthenticated (60 req/hr limit)"
         print(f"  Auth     : {auth}")
@@ -752,6 +690,8 @@ def find_repo_of_the_day(
             since_days=since_days,
             top_n=top_n,
             keyword=keyword,
+            keywords=keywords,
+            keyword_op=keyword_op,
             search_in=search_in,
         )
     except requests.HTTPError as exc:
@@ -807,27 +747,6 @@ def find_developer_of_the_day(
     output_fmt: Literal["text", "json", "csv"] = "text",
     output_file: str | None = None,
 ) -> None:
-    """
-    Fetch and display/export the top trending developers of the day.
-
-    Orchestration order:
-      1. Print session header (text mode only).
-      2. Fetch developers via search_trending_developers().
-      3. Render output in the requested format.
-
-    Args:
-        language:   Language filter. Default: None (all languages).
-        since_days: Days to look back for rising stars. Default: 1.
-        top_n:      Developers to show. Default: 10.
-        output_fmt: Output format: "text" (default), "json", or "csv".
-        output_file: Write output to this file path instead of stdout.
-
-    Returns:
-        None
-
-    Raises:
-        SystemExit(1): On GitHub API errors.
-    """
     if output_fmt == "text":
         print(f"\n{'#' * 70}")
         print(f"  daily-github-pulse v{VERSION}  —  {date.today().isoformat()}")
@@ -897,39 +816,29 @@ Examples:
   # Trending Python developers
   python github_repo_of_the_day.py --developers --language python
 
-  # Trending developers, JSON export
-  python github_repo_of_the_day.py --developers --output json
-
   # Named period shortcut (day / week / month)
   python github_repo_of_the_day.py --period week
-  python github_repo_of_the_day.py --period month --language rust
 
-  # Numeric fallback (--days still works)
-  python github_repo_of_the_day.py --days 14
-
-  # Top Python repos
-  python github_repo_of_the_day.py --language python
-
-  # Export as JSON to stdout
-  python github_repo_of_the_day.py --output json
-
-  # Export as CSV to a file
-  python github_repo_of_the_day.py --output csv --output-file results.csv
-
-  # JSON export, pipe into jq
-  python github_repo_of_the_day.py --output json | jq '.[].full_name'
-
-  # Search by keyword
+  # Search by single keyword
   python github_repo_of_the_day.py --keyword "LLM agent" --output json
+
+  # Multi-keyword AND (default)
+  python github_repo_of_the_day.py --keyword LLM --keyword agent
+
+  # Multi-keyword OR
+  python github_repo_of_the_day.py --keyword LLM --keyword GPT --keyword-op OR
+
+  # Boolean expression
+  python github_repo_of_the_day.py --keyword '(LLM OR GPT) AND agent AND NOT benchmark'
 
   # Search in README too (slower)
   python github_repo_of_the_day.py --keyword "MCP server" --search-in name,description,readme
 
+  # Export as CSV to a file
+  python github_repo_of_the_day.py --output csv --output-file results.csv
+
   # Skip velocity tracking
   python github_repo_of_the_day.py --no-snapshot
-
-  # Reset stored snapshots
-  python github_repo_of_the_day.py --clear-snapshots
 
 Token setup:
   Create a .env file:  GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxx
@@ -949,26 +858,39 @@ Token setup:
         "--period", "-p",
         choices=["day", "week", "month"],
         metavar="PERIOD",
-        help="Named look-back window: day (1), week (7), month (30). "
-             "Takes precedence over --days when both are supplied.",
+        help="Named look-back window: day (1), week (7), month (30).",
     )
     parser.add_argument("--days", "-d", type=int, default=1, metavar="N",
-                        help="Look back N days (default: 1 = today). "
-                             "Ignored when --period is used.")
+                        help="Look back N days (default: 1 = today).")
     parser.add_argument("--top", "-n", type=int, default=10, metavar="N",
                         help="Results per category/mode (default: 10)")
     parser.add_argument("--token", "-t", metavar="TOKEN",
                         help="GitHub PAT — overrides .env")
-    parser.add_argument("--keyword", "-k", metavar="WORD",
-                        help="Keyword to search (repos mode only)")
+    parser.add_argument(
+        "--keyword", "-k",
+        metavar="WORD",
+        action="append",
+        dest="keywords",
+        help=(
+            "Keyword to search (repos mode only). "
+            "Repeat flag for multi-keyword: --keyword LLM --keyword agent. "
+            "Supports boolean expressions: '(LLM OR GPT) AND agent AND NOT benchmark'."
+        ),
+    )
+    parser.add_argument(
+        "--keyword-op",
+        choices=["AND", "OR"],
+        default="AND",
+        metavar="OP",
+        help="Operator joining multiple --keyword values: AND (default) or OR.",
+    )
     parser.add_argument(
         "--search-in", "-s",
         default="name,description",
         metavar="SCOPE",
         help=(
             "Where to search the keyword: name, description, readme "
-            "(comma-separated, default: name,description). "
-            "Note: 'readme' is significantly slower."
+            "(comma-separated, default: name,description)."
         ),
     )
     parser.add_argument(
@@ -1010,6 +932,16 @@ Token setup:
 
     effective_days = resolve_period(args.period, args.days)
 
+    # Resolve keyword vs keywords for backward-compat
+    raw_keywords: list[str] | None = args.keywords  # list or None (action="append")
+    if raw_keywords and len(raw_keywords) == 1:
+        # Single --keyword value: pass as keyword (preserves boolean parser path)
+        kw_single: str | None = raw_keywords[0]
+        kw_list: list[str] | None = None
+    else:
+        kw_single = None
+        kw_list = raw_keywords  # None or list of 2+
+
     if args.developers:
         find_developer_of_the_day(
             language=args.language,
@@ -1023,7 +955,9 @@ Token setup:
             language=args.language,
             since_days=effective_days,
             top_n=args.top,
-            keyword=args.keyword,
+            keyword=kw_single,
+            keywords=kw_list,
+            keyword_op=args.keyword_op,
             search_in=args.search_in,
             use_snapshots=not args.no_snapshot,
             output_fmt=args.output,

@@ -231,9 +231,7 @@ class TestSaveSnapshots:
         assert data["owner/repo"]["stars"] == 500
 
     def test_merges_with_existing_data(self, tmp_snapshot_file):
-        # First save
         m.save_snapshots(self._make_repos("owner/alpha", 100))
-        # Second save with a different repo
         m.save_snapshots(self._make_repos("owner/beta", 200))
         data = json.loads(tmp_snapshot_file.read_text(encoding="utf-8"))
         assert "owner/alpha" in data
@@ -282,7 +280,6 @@ class TestFormatVelocity:
         assert "first run" in result
 
     def test_none_velocity_shows_first_run_message(self):
-        # velocity=None alone also triggers first-run path
         result = m.format_velocity(None, None)
         assert "first run" in result
 
@@ -359,6 +356,63 @@ class TestFormatRepo:
 
 
 # ──────────────────────────────────────────────
+# parse_boolean_query
+# ──────────────────────────────────────────────
+
+class TestParseBooleanQuery:
+    def test_plain_term_unchanged(self):
+        assert m.parse_boolean_query("LLM") == "LLM"
+
+    def test_and_removed(self):
+        result = m.parse_boolean_query("LLM AND agent")
+        assert "AND" not in result
+        assert "LLM" in result
+        assert "agent" in result
+
+    def test_or_preserved(self):
+        result = m.parse_boolean_query("LLM OR GPT")
+        assert "OR" in result
+        assert "LLM" in result
+        assert "GPT" in result
+
+    def test_not_becomes_minus(self):
+        result = m.parse_boolean_query("agent NOT benchmark")
+        assert "-benchmark" in result
+        assert "NOT" not in result
+
+    def test_parens_removed(self):
+        result = m.parse_boolean_query("(LLM OR GPT) AND agent")
+        assert "(" not in result
+        assert ")" not in result
+
+    def test_full_complex_expression(self):
+        result = m.parse_boolean_query("(LLM OR GPT) AND agent AND NOT benchmark")
+        assert "OR" in result
+        assert "agent" in result
+        assert "-benchmark" in result
+        assert "AND" not in result
+        assert "(" not in result
+        assert "NOT" not in result
+
+    def test_empty_string_raises_value_error(self):
+        with pytest.raises(ValueError):
+            m.parse_boolean_query("")
+
+    def test_whitespace_only_raises_value_error(self):
+        with pytest.raises(ValueError):
+            m.parse_boolean_query("   ")
+
+    def test_no_extra_whitespace_in_output(self):
+        result = m.parse_boolean_query("LLM AND agent")
+        assert "  " not in result  # no double spaces
+
+    def test_not_with_quoted_phrase(self):
+        result = m.parse_boolean_query('agent NOT "code review"')
+        assert '-"code review"' in result
+        assert "NOT" not in result
+
+
+# ──────────────────────────────────────────────
 # search_trending_repos
 # ──────────────────────────────────────────────
 
@@ -378,21 +432,18 @@ class TestSearchTrendingRepos:
 
     @patch("github_repo_of_the_day.requests.get")
     def test_browse_mode_returns_new_today_and_active_giants(self, mock_get):
-        """Without keyword, category labels must be 'New Today' and 'Active Giants'."""
         mock_get.return_value = _mock_response([self._repo(1, "owner/alpha")])
         result = m.search_trending_repos()
         assert set(result.keys()) == {"New Today", "Active Giants"}
 
     @patch("github_repo_of_the_day.requests.get")
     def test_search_mode_returns_new_relevant_and_active_relevant(self, mock_get):
-        """With keyword, category labels must be 'New & Relevant' and 'Active & Relevant'."""
         mock_get.return_value = _mock_response([self._repo(1, "owner/alpha")])
         result = m.search_trending_repos(keyword="LLM")
         assert set(result.keys()) == {"New & Relevant", "Active & Relevant"}
 
     @patch("github_repo_of_the_day.requests.get")
     def test_browse_mode_new_today_uses_stars_gt_10(self, mock_get):
-        """Browse mode: 'New Today' query must use stars:>10 threshold."""
         mock_get.return_value = _mock_response([])
         m.search_trending_repos(keyword=None)
         calls = mock_get.call_args_list
@@ -401,7 +452,6 @@ class TestSearchTrendingRepos:
 
     @patch("github_repo_of_the_day.requests.get")
     def test_browse_mode_active_giants_uses_stars_gt_1000(self, mock_get):
-        """Browse mode: 'Active Giants' query must use stars:>1000 threshold."""
         mock_get.return_value = _mock_response([])
         m.search_trending_repos(keyword=None)
         calls = mock_get.call_args_list
@@ -410,7 +460,6 @@ class TestSearchTrendingRepos:
 
     @patch("github_repo_of_the_day.requests.get")
     def test_search_mode_new_relevant_uses_stars_gt_50(self, mock_get):
-        """Search mode: 'New & Relevant' query must use stars:>50 (not stars:>10)."""
         mock_get.return_value = _mock_response([])
         m.search_trending_repos(keyword="LLM agent")
         calls = mock_get.call_args_list
@@ -420,7 +469,6 @@ class TestSearchTrendingRepos:
 
     @patch("github_repo_of_the_day.requests.get")
     def test_search_mode_active_relevant_uses_stars_gt_500(self, mock_get):
-        """Search mode: 'Active & Relevant' query must use stars:>500 (not stars:>1000)."""
         mock_get.return_value = _mock_response([])
         m.search_trending_repos(keyword="LLM agent")
         calls = mock_get.call_args_list
@@ -430,7 +478,6 @@ class TestSearchTrendingRepos:
 
     @patch("github_repo_of_the_day.requests.get")
     def test_search_mode_preserves_time_dimension(self, mock_get):
-        """Both search-mode queries must still include created:/pushed: time filter."""
         mock_get.return_value = _mock_response([])
         m.search_trending_repos(keyword="MCP", since_days=7)
         for call_args in mock_get.call_args_list:
@@ -442,7 +489,6 @@ class TestSearchTrendingRepos:
         shared_repo = self._repo(1, "owner/shared")
         mock_get.return_value = _mock_response([shared_repo])
         result = m.search_trending_repos()
-        # repo id=1 must appear in at most one category
         ids = [r["id"] for repos in result.values() for r in repos]
         assert ids.count(1) == 1
 
@@ -456,7 +502,6 @@ class TestSearchTrendingRepos:
 
     @patch("github_repo_of_the_day.requests.get")
     def test_keyword_single_word_quoted_in_query(self, mock_get):
-        """Single-word keyword must appear quoted so in: scope is unambiguous."""
         mock_get.return_value = _mock_response([])
         m.search_trending_repos(keyword="LLM")
         for call_args in mock_get.call_args_list:
@@ -465,8 +510,6 @@ class TestSearchTrendingRepos:
 
     @patch("github_repo_of_the_day.requests.get")
     def test_keyword_multi_word_quoted_in_query(self, mock_get):
-        """Multi-word phrase must be wrapped in quotes so GitHub Search
-        treats it as an exact phrase and in: applies to the whole phrase."""
         mock_get.return_value = _mock_response([])
         m.search_trending_repos(keyword="LLM agent")
         for call_args in mock_get.call_args_list:
@@ -475,7 +518,6 @@ class TestSearchTrendingRepos:
 
     @patch("github_repo_of_the_day.requests.get")
     def test_keyword_includes_in_scope(self, mock_get):
-        """search_in value must appear as in:<scope> after the quoted keyword."""
         mock_get.return_value = _mock_response([])
         m.search_trending_repos(keyword="MCP", search_in="name,description")
         for call_args in mock_get.call_args_list:
@@ -484,7 +526,6 @@ class TestSearchTrendingRepos:
 
     @patch("github_repo_of_the_day.requests.get")
     def test_no_keyword_produces_no_in_qualifier(self, mock_get):
-        """When keyword is None, the query must not contain an in: qualifier."""
         mock_get.return_value = _mock_response([])
         m.search_trending_repos(keyword=None)
         for call_args in mock_get.call_args_list:
@@ -492,12 +533,10 @@ class TestSearchTrendingRepos:
             assert " in:" not in query
 
     def test_invalid_search_in_raises_value_error(self):
-        """Tokens outside {name, description, readme} must fail immediately."""
         with pytest.raises(ValueError, match="Invalid search_in"):
             m.search_trending_repos(keyword="test", search_in="topics")
 
     def test_invalid_search_in_error_lists_valid_options(self):
-        """The ValueError message must name all valid tokens."""
         with pytest.raises(ValueError) as exc_info:
             m.search_trending_repos(keyword="test", search_in="xyz,topics")
         msg = str(exc_info.value)
@@ -506,7 +545,6 @@ class TestSearchTrendingRepos:
         assert "readme" in msg
 
     def test_valid_search_in_tokens_do_not_raise(self):
-        """All three valid tokens, alone or combined, must not raise."""
         valid_combos = [
             "name",
             "description",
@@ -534,3 +572,70 @@ class TestSearchTrendingRepos:
         result = m.search_trending_repos()
         for repos in result.values():
             assert repos == []
+
+    # ── Boolean keyword tests ────────────────────────────────────────────
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_boolean_keyword_not_quoted(self, mock_get):
+        """Boolean expression must NOT be wrapped in quotes."""
+        mock_get.return_value = _mock_response([])
+        m.search_trending_repos(keyword="LLM OR GPT")
+        for call_args in mock_get.call_args_list:
+            query = call_args.kwargs["params"]["q"]
+            # Should contain OR operator, not be a single quoted phrase
+            assert "OR" in query
+            assert '"LLM OR GPT"' not in query
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_boolean_not_translates_to_minus(self, mock_get):
+        """NOT operator in keyword must produce -term in query."""
+        mock_get.return_value = _mock_response([])
+        m.search_trending_repos(keyword="agent AND NOT benchmark")
+        for call_args in mock_get.call_args_list:
+            query = call_args.kwargs["params"]["q"]
+            assert "-benchmark" in query
+
+    # ── Multi-keyword tests ──────────────────────────────────────────────
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_multi_keyword_and_both_terms_in_query(self, mock_get):
+        """keywords=[LLM, agent] with AND op: both terms must appear in query."""
+        mock_get.return_value = _mock_response([])
+        m.search_trending_repos(keywords=["LLM", "agent"], keyword_op="AND")
+        for call_args in mock_get.call_args_list:
+            query = call_args.kwargs["params"]["q"]
+            assert '"LLM"' in query
+            assert '"agent"' in query
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_multi_keyword_or_uses_or_operator(self, mock_get):
+        """keywords=[LLM, GPT] with OR op: query must contain OR."""
+        mock_get.return_value = _mock_response([])
+        m.search_trending_repos(keywords=["LLM", "GPT"], keyword_op="OR")
+        for call_args in mock_get.call_args_list:
+            query = call_args.kwargs["params"]["q"]
+            assert "OR" in query
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_multi_keyword_returns_relevant_categories(self, mock_get):
+        """Multi-keyword mode must use search-mode category labels."""
+        mock_get.return_value = _mock_response([self._repo(1, "owner/alpha")])
+        result = m.search_trending_repos(keywords=["LLM", "agent"])
+        assert set(result.keys()) == {"New & Relevant", "Active & Relevant"}
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_multi_keyword_includes_in_scope(self, mock_get):
+        """Multi-keyword query must include in: scope qualifier."""
+        mock_get.return_value = _mock_response([])
+        m.search_trending_repos(
+            keywords=["LLM", "agent"],
+            search_in="name,description",
+        )
+        for call_args in mock_get.call_args_list:
+            query = call_args.kwargs["params"]["q"]
+            assert "in:name,description" in query
+
+    def test_invalid_keyword_op_raises_value_error(self):
+        """keyword_op outside AND/OR must raise ValueError immediately."""
+        with pytest.raises(ValueError, match="keyword_op"):
+            m.search_trending_repos(keywords=["LLM"], keyword_op="XOR")
