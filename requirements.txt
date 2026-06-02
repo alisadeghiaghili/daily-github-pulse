@@ -1,3 +1,5 @@
-requests
-python-dotenv
-pytest
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# Optional — required only for --wildcard expansion
+# nltk>=3.8

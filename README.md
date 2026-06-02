@@ -1,235 +1,215 @@
 # daily-github-pulse
 
-[![CI](https://github.com/alisadeghiaghili/daily-github-pulse/actions/workflows/tests.yml/badge.svg)](https://github.com/alisadeghiaghili/daily-github-pulse/actions/workflows/tests.yml)
+> Discover GitHub's top trending repositories and developers of the day — with real star velocity, boolean keyword search, and wildcard expansion.
 
-Discover GitHub's trending repositories and developers — with real star
-velocity tracking.
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ---
 
 ## Features
 
-- **Two-strategy repo search** — *New Today* (recently created) and *Active
-  Giants* (recently pushed) in browse mode; *New & Relevant* and
-  *Active & Relevant* in keyword/search mode.
-- **Star velocity** — raw delta (stars gained since last run) **and**
-  time-normalised rate (⭐/day), so the number stays meaningful even if
-  you haven't run the tool in days.
-- **Multi-keyword boolean search** — combine multiple keywords with `AND`
-  or `OR`, exclude noisy terms with `NOT`.
-- **Developer discovery** — Rising Stars and Active Veterans, enriched with
-  full profile data.
-- **Flexible output** — human-readable text, JSON, or CSV.
-- **Language filter** — narrow results to any GitHub-recognised language.
-- **Named time windows** — `--period day/week/month` shorthand.
-- **GitHub token support** — via `--token`, `.env`, or `GITHUB_TOKEN` env var.
+| Feature | Flag | Notes |
+|---|---|---|
+| Browse trending repos | _(default)_ | New Today + Active Giants |
+| Trending developers | `--developers` | Rising Stars + Active Veterans |
+| Language filter | `--language python` | Any GitHub language slug |
+| Look-back period | `--period week` | `day` / `week` / `month` or `--days N` |
+| Single keyword | `--keyword "LLM agent"` | Searches name + description |
+| Multi-keyword boolean | `--keywords LLM agent` | AND / OR via `--keyword-op` |
+| Full boolean expression | `--bool-query '(LLM OR GPT) AND agent'` | Supports NOT and parentheses |
+| Exclusion terms | `--keyword-not benchmark survey` | Appends `NOT "term"` clauses |
+| **Wildcard expansion** | `--wildcard` | `analy?e` → `analyse OR analyze` |
+| Search scope | `--search-in name,description,readme` | readme is slower |
+| Star velocity | _(auto)_ | Stars/day, time-normalised |
+| Export formats | `--output json/csv` | Pipe-friendly |
+| File export | `--output-file results.csv` | json or csv |
+
+---
+
+## Installation
+
+```bash
+git clone https://github.com/alisadeghiaghili/daily-github-pulse.git
+cd daily-github-pulse
+pip install -r requirements.txt
+
+# Optional: wildcard expansion support
+pip install nltk
+
+# Recommended: add your GitHub token (raises rate limit to 5,000 req/hr)
+cp .env.example .env
+# edit .env and set GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxx
+```
 
 ---
 
 ## Quick Start
 
 ```bash
-pip install requests python-dotenv
+# Today's top repos (all languages)
 python github_repo_of_the_day.py
+
+# Top Python repos this week
+python github_repo_of_the_day.py --language python --period week
+
+# Search for LLM + agent repos
+python github_repo_of_the_day.py --keywords LLM agent --keyword-op AND
+
+# Full boolean query
+python github_repo_of_the_day.py --bool-query '(LLM OR GPT) AND agent AND NOT benchmark'
+
+# Wildcard: analy?e → analyse OR analyze
+python github_repo_of_the_day.py --keywords "analy?e" --wildcard
+
+# Trending developers
+python github_repo_of_the_day.py --developers --language python
 ```
 
 ---
 
-## Usage
+## Keyword Search
 
-### Repository search
-
+### Single keyword (legacy)
 ```bash
-# Browse mode — today's trending repos (all languages)
-python github_repo_of_the_day.py
+python github_repo_of_the_day.py --keyword "vector database"
+```
 
-# Language filter
-python github_repo_of_the_day.py --language python
-
-# Named time window
-python github_repo_of_the_day.py --period week
-python github_repo_of_the_day.py --period month --language rust
-
-# Single keyword (legacy)
-python github_repo_of_the_day.py --keyword "LLM agent"
-
-# Multi-keyword AND (both terms must match)
+### Multi-keyword with boolean operator
+```bash
+# AND: both terms must appear
 python github_repo_of_the_day.py --keywords LLM agent --keyword-op AND
 
-# Multi-keyword OR (either term matches)
+# OR: either term
 python github_repo_of_the_day.py --keywords LLM GPT Claude --keyword-op OR
 
-# Exclude noisy terms
+# With exclusions
 python github_repo_of_the_day.py --keywords LLM agent --keyword-not benchmark survey
-
-# Search in README too (slower)
-python github_repo_of_the_day.py --keywords MCP server --search-in name,description,readme
-
-# JSON export
-python github_repo_of_the_day.py --keywords LLM agent --keyword-op AND --output json
-
-# CSV to file
-python github_repo_of_the_day.py --output csv --output-file results.csv
 ```
 
-### Developer search
-
+### Full boolean expression
 ```bash
-# Trending developers (all languages)
-python github_repo_of_the_day.py --developers
-
-# Trending Python developers
-python github_repo_of_the_day.py --developers --language python
-
-# JSON export
-python github_repo_of_the_day.py --developers --output json
+python github_repo_of_the_day.py --bool-query '(LLM OR GPT) AND agent AND NOT benchmark'
 ```
 
-### Snapshot / velocity
+Supported syntax: `AND`, `OR`, `NOT`, quoted phrases `"multi word"`, and parentheses `(A OR B) AND C`.
+
+### Wildcard expansion
+
+Requires `pip install nltk` (corpus auto-downloaded on first use).
 
 ```bash
-# Skip velocity tracking for this run
+# ? = exactly one character
+python github_repo_of_the_day.py --keywords "analy?e" --wildcard
+# → query includes: (analyse OR analyze)
+
+# * = zero or more characters
+python github_repo_of_the_day.py --keywords "optimiz*" agent --wildcard
+# → query includes: (optimize OR optimized OR optimizes OR optimizing ...) AND agent
+```
+
+> **Without `nltk`:** `--wildcard` is a no-op — terms pass through unchanged. No crash, no warning.
+
+---
+
+## Star Velocity
+
+On each run, star counts are saved to `~/.daily-github-pulse/snapshots.json`.
+On subsequent runs, two numbers are shown:
+
+- **Δ raw** — total stars gained since last snapshot
+- **~N ⭐/day** — time-normalised rate (stays meaningful across long gaps)
+
+```
+  Δ +1,400 ⭐ total  |  ~200.0 ⭐/day
+```
+
+```bash
+# Skip snapshot for this run
 python github_repo_of_the_day.py --no-snapshot
 
-# Reset all stored snapshots
+# Reset all snapshots
 python github_repo_of_the_day.py --clear-snapshots
 ```
 
 ---
 
-## CLI Reference
+## Export
 
-| Flag | Short | Default | Description |
+```bash
+# JSON to stdout (pipe into jq)
+python github_repo_of_the_day.py --output json | jq '.[].full_name'
+
+# CSV to file
+python github_repo_of_the_day.py --output csv --output-file results.csv
+
+# Developers as JSON
+python github_repo_of_the_day.py --developers --output json
+```
+
+---
+
+## All Options
+
+```
+usage: daily-github-pulse [-h] [--developers] [--language LANG]
+                          [--period PERIOD] [--days N] [--top N]
+                          [--token TOKEN] [--keyword WORD]
+                          [--keywords WORD [WORD ...]]
+                          [--bool-query EXPR]
+                          [--keyword-op OP]
+                          [--keyword-not WORD [WORD ...]]
+                          [--search-in SCOPE]
+                          [--wildcard]
+                          [--output FORMAT] [--output-file FILE]
+                          [--no-snapshot] [--clear-snapshots] [--version]
+
+options:
+  --developers          Show trending developers instead of repositories
+  --language LANG       Filter by language (e.g. python, go, rust)
+  --period PERIOD       day / week / month  (overrides --days)
+  --days N              Look back N days (default: 1)
+  --top N               Results per category (default: 10)
+  --token TOKEN         GitHub PAT — overrides .env
+  --keyword WORD        Single keyword search (legacy)
+  --keywords WORD ...   Multi-keyword boolean search
+  --bool-query EXPR     Full boolean expression: '(A OR B) AND C AND NOT D'
+  --keyword-op OP       AND (default) or OR connector for --keywords
+  --keyword-not WORD .. Exclude terms via NOT clauses
+  --search-in SCOPE     name,description,readme  (default: name,description)
+  --wildcard            Expand ? and * in --keywords via NLTK corpus
+  --output FORMAT       text (default), json, csv
+  --output-file FILE    Write output to file (json/csv)
+  --no-snapshot         Skip snapshot I/O for this run
+  --clear-snapshots     Delete snapshot file and exit
+  --version             Show version and exit
+```
+
+---
+
+## Token Setup
+
+```bash
+cp .env.example .env
+# Set GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxx inside .env
+```
+
+Without a token: 60 req/hr (unauthenticated).  
+With a token: 5,000 req/hr.
+
+Get a token → [github.com/settings/tokens](https://github.com/settings/tokens)
+
+---
+
+## How Search Modes Work
+
+| Mode | Triggered by | New repos threshold | Active repos threshold |
 |---|---|---|---|
-| `--developers` | | `False` | Show trending developers instead of repos |
-| `--language` | `-l` | — | Filter by programming language |
-| `--period` | `-p` | — | `day` / `week` / `month` shorthand |
-| `--days` | `-d` | `1` | Look-back window in days (ignored if `--period` set) |
-| `--top` | `-n` | `10` | Results per category |
-| `--token` | `-t` | — | GitHub PAT (overrides `.env`) |
-| `--keyword` | `-k` | — | Single keyword (legacy; mutually exclusive with `--keywords`) |
-| `--keywords` | | — | One or more keywords for boolean search |
-| `--keyword-op` | | `AND` | Connector between `--keywords`: `AND` or `OR` |
-| `--keyword-not` | | — | Terms to exclude (`NOT` clauses) |
-| `--search-in` | `-s` | `name,description` | Search scope: `name`, `description`, `readme` |
-| `--output` | `-o` | `text` | Output format: `text`, `json`, `csv` |
-| `--output-file` | `-f` | — | Write output to file instead of stdout |
-| `--no-snapshot` | | `False` | Disable snapshot for this run |
-| `--clear-snapshots` | | — | Delete all snapshots and exit |
-| `--version` | | — | Print version and exit |
-
----
-
-## Multi-Keyword Boolean Search
-
-The `--keywords` flag accepts one or more terms and composes a GitHub Search
-query fragment:
-
-| Command | GitHub query fragment |
-|---|---|
-| `--keywords LLM` | `"LLM" in:name,description` |
-| `--keywords LLM agent --keyword-op AND` | `"LLM" AND "agent" in:name,description` |
-| `--keywords LLM GPT --keyword-op OR` | `"LLM" OR "GPT" in:name,description` |
-| `--keywords LLM agent --keyword-not benchmark` | `"LLM" AND "agent" in:name,description NOT "benchmark"` |
-
-**Rules:**
-- Each term is quoted → multi-word phrases match as exact phrases.
-- `in:` scope is appended **once**, not once per term.
-- `--keyword-not` terms are appended as `NOT "term"` after the positive block.
-- `--keywords` and `--keyword` are mutually exclusive.
-- `--keywords` (empty) → browse mode.
-
----
-
-## How Velocity Works
-
-On each run, star counts are saved to `~/.daily-github-pulse/snapshots.json`.
-On the next run:
-
-- **star_delta** — raw difference since last snapshot.
-- **daily_velocity** — time-normalised rate: `star_delta ÷ elapsed_days`,
-  rounded to one decimal place. A repo that gained 1 400 stars over 14 days
-  reports `100.0 ⭐/day`, the same as one that gained 100 stars today.
-
----
-
-## Auth & Rate Limits
-
-| Mode | Rate limit |
-|---|---|
-| Unauthenticated | 60 requests / hour |
-| Authenticated (PAT) | 5,000 requests / hour |
-
-Create a `.env` file in the project root:
-
-```
-GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxx
-```
-
-Add `.env` to `.gitignore`. Get a token at
-https://github.com/settings/tokens (no scopes needed for public search).
-
----
-
-## CI
-
-Every push and pull request to `main` runs the full test suite across
-Python 3.9 – 3.14 via GitHub Actions.
-
-To enable Telegram notifications, add two repository secrets:
-- `TELEGRAM_BOT_TOKEN` — your bot token from @BotFather
-- `TELEGRAM_CHAT_ID` — your chat / channel ID
-
-The `notify` job skips silently if the secrets are absent.
-
----
-
-## Python API
-
-```python
-from github_repo_of_the_day import (
-    build_keyword_qualifier,
-    search_trending_repos,
-    find_repo_of_the_day,
-)
-
-# Build a query fragment manually
-q = build_keyword_qualifier(
-    ["LLM", "agent"],
-    keyword_op="AND",
-    keyword_not=["benchmark"],
-    search_in="name,description",
-)
-# '"LLM" AND "agent" in:name,description NOT "benchmark"'
-
-# Boolean OR search
-results = search_trending_repos(
-    keywords=["LLM", "GPT", "Claude"],
-    keyword_op="OR",
-    since_days=7,
-    language="python",
-)
-
-# With exclusions
-results = search_trending_repos(
-    keywords=["LLM", "agent"],
-    keyword_op="AND",
-    keyword_not=["benchmark", "survey"],
-)
-
-# High-level entry point
-find_repo_of_the_day(
-    keywords=["MCP", "server"],
-    keyword_op="AND",
-    keyword_not=["deprecated"],
-    language="python",
-    since_days=7,
-    output_fmt="json",
-)
-```
+| Browse | no keyword flags | stars > 10 | stars > 1,000 |
+| Search | any keyword flag | stars > 50 | stars > 500 |
 
 ---
 
 ## License
 
-MIT
+[MIT](LICENSE)
