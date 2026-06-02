@@ -258,7 +258,7 @@ _TOKEN_RE = re.compile(
     r'"[^"]*"'          # quoted phrase
     r'|\('              # open paren
     r'|\)'              # close paren
-    r'|[^\s()"]+',      # bare word / operator
+    r'|[^\s()\"]+',     # bare word / operator
     re.IGNORECASE,
 )
 
@@ -1928,4 +1928,9 @@ AI filter setup:
             search_in=args.search_in,
             bool_query=bool_query_ast,
             use_snapshots=not args.no_snapshot,
-            output_fmt=args.outp
+            output_fmt=args.output,
+            output_file=args.output_file,
+            wildcard=args.wildcard,
+            ai_filter_query=args.ai_filter,
+            ai_filter_fallback=args.ai_filter_fallback,
+        )
