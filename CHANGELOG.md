@@ -8,6 +8,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **`tests/test_github_repo.py` truncation** — the file was committed with a
+  mid-line cut (`json.dumps(s` with an unclosed parenthesis at line 201),
+  causing a `SyntaxError` that prevented pytest from collecting any tests
+  (`ERROR collecting tests/test_github_repo.py`). Restored the complete file
+  containing all existing test classes plus the two new Priority-B classes:
+  - **`TestBuildKeywordQualifier`** (25 tests)
+  - **`TestSearchTrendingReposMultiKeyword`** (9 integration tests)
+
 ---
 
 ## [1.8.0] - 2026-06-02
@@ -82,7 +91,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **`daily_velocity()`** — new pure function computing the time-normalised
   star growth rate: `star_delta / elapsed_days`, rounded to one decimal
   place.  A repo that gained 1 400 stars over 14 days reports `100.0`,
-  the same as one that gained 100 stars in 24 hours — the number stays
+  the same as one that gained 100 stars today — the number stays
   meaningful regardless of how long ago the snapshot was taken.
 - **`daily_velocity` field** added to `EXPORT_FIELDS` and surfaced in
   JSON / CSV exports (`null` / empty on first run).
