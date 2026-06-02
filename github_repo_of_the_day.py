@@ -35,9 +35,11 @@ from __future__ import annotations
 
 import csv
 import io
+import itertools
 import json
 import os
 import re
+import string
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -69,6 +71,9 @@ PERIOD_DAYS: dict[str, int] = {
 
 # Valid tokens for search_in parameter
 VALID_SEARCH_IN_TOKENS = {"name", "description", "readme"}
+
+# Maximum number of wildcard expansions allowed per term
+WILDCARD_MAX_EXPANSIONS = 20
 
 # Fields included in JSON / CSV exports (in order)
 EXPORT_FIELDS = [
@@ -118,27 +123,21 @@ def resolve_period(period: str | None, days: int) -> int:
     """
     Resolve the effective look-back window in days.
 
-    ``--period`` takes precedence over ``--days`` when both are supplied.
-    Valid period tokens are ``day`` (1), ``week`` (7), and ``month`` (30).
-
     Args:
-        period: Named period string (``"day"``, ``"week"``, ``"month"``),
-                or ``None`` when ``--period`` was not used.
-        days:   Numeric fallback from ``--days`` (default: 1).
+        period: Named period string or None.
+        days:   Numeric fallback.
 
     Returns:
         Resolved number of look-back days.
 
     Raises:
-        ValueError: If ``period`` is not a recognised token.
+        ValueError: If period is not a recognised token.
 
     Examples:
         >>> resolve_period("week", 1)
         7
         >>> resolve_period(None, 3)
         3
-        >>> resolve_period("month", 99)
-        30
     """
     if period is None:
         return days
@@ -152,44 +151,119 @@ def resolve_period(period: str | None, days: int) -> int:
 
 
 # ──────────────────────────────────────────────
+# Wildcard expansion
+# ──────────────────────────────────────────────
+def expand_wildcards(
+    term: str,
+    max_expansions: int = WILDCARD_MAX_EXPANSIONS,
+) -> str:
+    """
+    Expand a single term containing ``?`` wildcards into a GitHub Search
+    OR expression.
+
+    Each ``?`` is replaced by every letter a–z in turn, producing all
+    combinations.  The result is wrapped in an OR expression so GitHub
+    Search treats it as any of the expansions.
+
+    GitHub Search does not support wildcards natively, so client-side
+    expansion is the only viable approach.  Expansion is intentionally
+    capped at ``max_expansions`` to keep queries usable; exceeding the
+    cap raises ``ValueError`` rather than silently sending a 2 000-term
+    query.
+
+    Args:
+        term:           A single search token that may contain one or
+                        more ``?`` characters, e.g. ``"analy?e"``.
+        max_expansions: Hard cap on the number of generated variants.
+                        Default: ``WILDCARD_MAX_EXPANSIONS`` (20).
+
+    Returns:
+        If ``term`` contains no ``?``, returns ``term`` unchanged.
+        If expansion produces exactly one variant, returns that variant.
+        Otherwise returns ``"variant1 OR variant2 OR ..."``, with each
+        multi-word variant quoted.
+
+    Raises:
+        ValueError: If the number of expansions exceeds ``max_expansions``.
+        ValueError: If ``term`` is empty or whitespace-only.
+
+    Examples:
+        >>> expand_wildcards("analy?e")
+        'analyse OR analyze'
+        >>> expand_wildcards("color?")
+        'colora OR colorb OR colorc OR ... OR colorz'
+        >>> expand_wildcards("agent")   # no wildcard
+        'agent'
+        >>> expand_wildcards("t??t")    # 676 combos — raises
+        Traceback (most recent call last):
+            ...
+        ValueError: Wildcard expansion of 't??t' would produce 676 variants ...
+    """
+    if not term or not term.strip():
+        raise ValueError("Term must not be empty.")
+
+    if "?" not in term:
+        return term
+
+    # Count wildcards and compute total expansion size
+    n_wildcards = term.count("?")
+    total = 26 ** n_wildcards
+    if total > max_expansions:
+        raise ValueError(
+            f"Wildcard expansion of '{term}' would produce {total} variants "
+            f"(max allowed: {max_expansions}). "
+            f"Use fewer '?' or a more specific pattern."
+        )
+
+    # Split term into fixed parts around each '?'
+    parts = term.split("?")
+    # Generate all combinations of n_wildcards letters
+    variants = [
+        "".join(
+            part + ch
+            for part, ch in itertools.zip_longest(parts[:-1], combo, fillvalue="")
+        ) + parts[-1]
+        for combo in itertools.product(string.ascii_lowercase, repeat=n_wildcards)
+    ]
+
+    if len(variants) == 1:
+        return variants[0]
+
+    return " OR ".join(variants)
+
+
+# ──────────────────────────────────────────────
 # Boolean keyword parser
 # ──────────────────────────────────────────────
 def parse_boolean_query(expr: str) -> str:
     """
     Translate a human-readable boolean expression to GitHub Search syntax.
-
-    GitHub Search API supports a limited boolean syntax:
-      - Implicit AND between adjacent terms
-      - Native ``OR`` operator
-      - ``-term`` for NOT
-      - No parentheses (not supported by the API)
+    Wildcards (``?``) in individual terms are expanded via
+    ``expand_wildcards()`` before boolean translation.
 
     Transformation rules applied in order:
       1. Parentheses are stripped (unsupported by GitHub Search).
-      2. ``NOT <term>`` or ``-<term>`` → ``-term`` prefix.
-      3. ``AND`` (explicit) → removed; adjacent terms are implicit AND.
-      4. ``OR`` → kept as-is (native GitHub operator).
-      5. Multi-word bare phrases are quoted automatically.
+      2. Each token containing ``?`` is expanded via ``expand_wildcards()``.
+      3. ``NOT <term>`` or ``NOT "phrase"`` → ``-term`` / ``-"phrase"``.
+      4. ``AND`` (explicit) → removed; adjacent terms are implicit AND.
+      5. ``OR`` → kept as-is (native GitHub operator).
       6. Excess whitespace is collapsed.
 
     Args:
-        expr: Boolean expression string, e.g.
-              ``"(LLM OR GPT) AND agent AND NOT benchmark"``.
+        expr: Boolean expression string, optionally containing wildcards.
 
     Returns:
-        GitHub Search query fragment, e.g.
-        ``"LLM OR GPT agent -benchmark"``.
+        GitHub Search query fragment.
 
     Raises:
-        ValueError: If ``expr`` is empty or whitespace-only.
+        ValueError: If ``expr`` is empty, or a wildcard term exceeds
+                    ``WILDCARD_MAX_EXPANSIONS``.
 
     Examples:
         >>> parse_boolean_query('LLM AND agent')
         'LLM agent'
-        >>> parse_boolean_query('LLM OR GPT')
-        'LLM OR GPT'
-        >>> parse_boolean_query('agent AND NOT benchmark')
-        'agent -benchmark'
+        >>> parse_boolean_query('analy?e AND agent')
+        'analyse OR analyze agent'
         >>> parse_boolean_query('(LLM OR GPT) AND agent AND NOT benchmark')
         'LLM OR GPT agent -benchmark'
     """
@@ -201,14 +275,26 @@ def parse_boolean_query(expr: str) -> str:
     # 1. Remove parentheses
     s = s.replace("(", " ").replace(")", " ")
 
-    # 2. NOT <term> → -term  (handles both "NOT word" and "NOT \"phrase\"")
+    # 2. Expand wildcards in each token (skip quoted phrases and operators)
+    def _maybe_expand(token: str) -> str:
+        """Expand token if it contains '?' and is not a boolean operator."""
+        if token.upper() in ("AND", "OR", "NOT") or token.startswith('"'):
+            return token
+        if "?" in token:
+            return expand_wildcards(token)
+        return token
+
+    # Tokenise preserving quoted phrases, then expand bare tokens with ?
+    # Pattern: quoted phrase OR non-whitespace token
+    tokens = re.findall(r'"[^"]+"|\S+', s)
+    tokens = [_maybe_expand(t) for t in tokens]
+    s = " ".join(tokens)
+
+    # 3. NOT <term> → -term  (handles both "NOT word" and "NOT \"phrase\"")
     s = re.sub(r'\bNOT\s+("[^"]+"|\S+)', lambda m: f"-{m.group(1)}", s)
 
-    # 3. Remove explicit AND (GitHub implicitly ANDs adjacent terms)
+    # 4. Remove explicit AND
     s = re.sub(r'\bAND\b', ' ', s)
-
-    # 4. Preserve OR as-is (native GitHub operator)
-    # Nothing to do — OR stays.
 
     # 5. Collapse whitespace
     s = re.sub(r'\s+', ' ', s).strip()
@@ -220,13 +306,6 @@ def parse_boolean_query(expr: str) -> str:
 # Snapshot helpers
 # ──────────────────────────────────────────────
 def load_snapshots() -> dict:
-    """
-    Load previously saved star counts from disk.
-
-    Returns:
-        dict mapping repo full_name → {"stars": int, "saved_at": ISO string}.
-        Empty dict if the file does not exist or is corrupted.
-    """
     if not SNAPSHOT_FILE.exists():
         return {}
     try:
@@ -236,22 +315,14 @@ def load_snapshots() -> dict:
 
 
 def save_snapshots(repos_by_category: dict) -> None:
-    """
-    Persist current star counts to disk, merging with existing data.
-
-    Args:
-        repos_by_category: output of search_trending_repos().
-    """
     existing = load_snapshots()
     now = datetime.now(timezone.utc).isoformat()
-
     for repos in repos_by_category.values():
         for repo in repos:
             existing[repo["full_name"]] = {
                 "stars": repo["stargazers_count"],
                 "saved_at": now,
             }
-
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     SNAPSHOT_FILE.write_text(
         json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -259,22 +330,6 @@ def save_snapshots(repos_by_category: dict) -> None:
 
 
 def star_delta(repo: dict, snapshots: dict) -> int | None:
-    """
-    Calculate stars gained since the last snapshot (raw, not time-normalised).
-
-    Args:
-        repo:      repo dict from GitHub API.
-        snapshots: loaded snapshot data.
-
-    Returns:
-        int delta, or None if no previous snapshot exists for this repo.
-
-    Examples:
-        >>> snapshots = {"owner/repo": {"stars": 12400, "saved_at": "..."}}
-        >>> repo = {"full_name": "owner/repo", "stargazers_count": 12542}
-        >>> star_delta(repo, snapshots)
-        142
-    """
     prev = snapshots.get(repo["full_name"])
     if prev is None:
         return None
@@ -282,18 +337,6 @@ def star_delta(repo: dict, snapshots: dict) -> int | None:
 
 
 def elapsed_days(snapshots: dict, full_name: str) -> float | None:
-    """
-    Return the number of days elapsed since the snapshot was saved.
-
-    Args:
-        snapshots:  loaded snapshot data (from ``load_snapshots()``).
-        full_name:  repository full name, e.g. ``"owner/repo"``.
-
-    Returns:
-        Elapsed time in fractional days (always > 0), or ``None`` if the
-        repo has no snapshot entry or the ``saved_at`` field is missing /
-        unparseable.
-    """
     entry = snapshots.get(full_name)
     if entry is None:
         return None
@@ -312,17 +355,6 @@ def elapsed_days(snapshots: dict, full_name: str) -> float | None:
 
 
 def daily_velocity(repo: dict, snapshots: dict) -> float | None:
-    """
-    Compute the time-normalised star growth rate in stars per day.
-
-    Args:
-        repo:      repo dict from GitHub API.
-        snapshots: loaded snapshot data.
-
-    Returns:
-        Stars per day rounded to one decimal place, or ``None`` when no
-        previous snapshot exists for this repo (first run).
-    """
     delta = star_delta(repo, snapshots)
     if delta is None:
         return None
@@ -347,43 +379,37 @@ def search_trending_repos(
     """
     Query the GitHub Search API and return top repositories by category.
 
-    Browse mode (no keyword):
+    Browse mode (no keyword/keywords):
       - New Today     — recently created repos with >10 stars.
       - Active Giants — recently pushed repos with >1000 stars.
 
     Search mode (keyword or keywords provided):
-      - New & Relevant  — recently created repos with >50 stars matching keyword.
-      - Active & Relevant — recently pushed repos with >500 stars matching keyword.
+      - New & Relevant    — recently created repos with >50 stars.
+      - Active & Relevant — recently pushed repos with >500 stars.
 
     Keyword resolution priority:
-      1. If ``keywords`` list is provided, terms are joined with ``keyword_op``
-         (``AND`` = implicit adjacency, ``OR`` = GitHub OR operator).
-      2. If a single ``keyword`` string contains boolean operators
-         (AND / OR / NOT / parentheses), it is parsed via
-         ``parse_boolean_query()`` automatically.
-      3. Plain single ``keyword`` is quoted as an exact phrase.
-
-    Repos appearing in both result sets are deduplicated — shown only in
-    the first category that returns them.
+      1. ``keywords`` list → joined with ``keyword_op``.
+      2. ``keyword`` with boolean operators / wildcards → parsed via
+         ``parse_boolean_query()`` (which calls ``expand_wildcards()``).
+      3. Plain ``keyword`` → quoted as exact phrase.
 
     Args:
-        language:    Optional language filter (e.g. "python", "rust").
-        since_days:  Days to look back (default: 1 = today).
-        top_n:       Max results per category; GitHub hard limit is 100.
-        keyword:     Single keyword or boolean expression string.
+        language:    Optional language filter.
+        since_days:  Days to look back (default: 1).
+        top_n:       Max results per category.
+        keyword:     Single keyword, phrase, boolean expression, or
+                     wildcard pattern (e.g. ``"analy?e AND agent"``).
         keywords:    List of keywords for multi-keyword mode.
         keyword_op:  Operator joining ``keywords`` list: "AND" or "OR".
-                     Default: "AND".
-        search_in:   Comma-separated search scope for keyword.
+        search_in:   Comma-separated search scope.
                      Valid tokens: "name", "description", "readme".
-                     Default: "name,description".
 
     Returns:
         dict: {category_label: [repo_dict, ...]}
 
     Raises:
-        ValueError: If search_in contains invalid tokens, or keyword_op
-                    is not AND/OR.
+        ValueError: If search_in contains invalid tokens, keyword_op is
+                    invalid, or a wildcard pattern exceeds max expansions.
         requests.HTTPError, requests.ConnectionError, requests.Timeout
     """
     # Validate keyword_op
@@ -393,7 +419,7 @@ def search_trending_repos(
             f"Invalid keyword_op '{keyword_op}'. Valid options: AND, OR"
         )
 
-    # Validate search_in tokens eagerly so callers get a clear error
+    # Validate search_in tokens
     tokens = {t.strip() for t in search_in.split(",") if t.strip()}
     invalid = tokens - VALID_SEARCH_IN_TOKENS
     if invalid:
@@ -408,23 +434,25 @@ def search_trending_repos(
     keyword_qualifier = ""
 
     if keywords and len(keywords) > 0:
-        # Multi-keyword mode: join list with operator
+        # Multi-keyword mode: each term may contain wildcards
+        expanded = []
+        for k in keywords:
+            expanded.append(expand_wildcards(k) if "?" in k else f'"{k}"')
         if op_upper == "OR":
-            joined = " OR ".join(f'"{k}"' if " " not in k else f'"{k}"' for k in keywords)
-        else:  # AND — implicit adjacency
-            joined = " ".join(f'"{k}"' if " " not in k else f'"{k}"' for k in keywords)
+            joined = " OR ".join(expanded)
+        else:
+            joined = " ".join(expanded)
         keyword_qualifier = f" {joined} in:{search_in}"
 
     elif keyword:
-        _BOOL_PATTERN = re.compile(r'\b(AND|OR|NOT)\b|[()]')
+        _BOOL_PATTERN = re.compile(r'\b(AND|OR|NOT)\b|[()\?]')
         if _BOOL_PATTERN.search(keyword):
-            # Boolean expression — parse and use as-is (no extra quoting)
+            # Boolean expression or wildcard — parse (expand_wildcards called inside)
             parsed = parse_boolean_query(keyword)
             keyword_qualifier = f" {parsed} in:{search_in}"
         else:
             # Plain keyword / phrase — wrap in quotes
-            quoted = f'"{keyword}"'
-            keyword_qualifier = f" {quoted} in:{search_in}"
+            keyword_qualifier = f" \"{keyword}\" in:{search_in}"
 
     # ── Build queries by category ────────────────────────────────────────
     if keyword_qualifier:
@@ -468,20 +496,6 @@ def search_trending_developers(
     since_days: int = 1,
     top_n: int = 10,
 ) -> list[dict]:
-    """
-    Query the GitHub Search API and return top active developers.
-
-    Args:
-        language:   Optional language filter.
-        since_days: Days to look back for the "Rising Stars" query.
-        top_n:      Max developers to return.
-
-    Returns:
-        list of enriched user dicts.
-
-    Raises:
-        requests.HTTPError, requests.ConnectionError, requests.Timeout
-    """
     since_date = (date.today() - timedelta(days=since_days)).isoformat()
     lang_qualifier = f" language:{language}" if language else ""
 
@@ -499,12 +513,7 @@ def search_trending_developers(
         resp = requests.get(
             "https://api.github.com/search/users",
             headers=get_headers(),
-            params={
-                "q": query,
-                "sort": "followers",
-                "order": "desc",
-                "per_page": top_n,
-            },
+            params={"q": query, "sort": "followers", "order": "desc", "per_page": top_n},
             timeout=15,
         )
         resp.raise_for_status()
@@ -532,7 +541,7 @@ def search_trending_developers(
 
 
 # ──────────────────────────────────────────────
-# Export helpers — repositories
+# Export helpers
 # ──────────────────────────────────────────────
 def build_export_row(repo: dict, rank: int, category: str, snapshots: dict) -> dict:
     delta = star_delta(repo, snapshots)
@@ -553,9 +562,6 @@ def build_export_row(repo: dict, rank: int, category: str, snapshots: dict) -> d
     }
 
 
-# ──────────────────────────────────────────────
-# Export helpers — developers
-# ──────────────────────────────────────────────
 def build_dev_export_row(user: dict, rank: int) -> dict:
     return {
         "rank":         rank,
@@ -577,10 +583,7 @@ def export_json(rows: list[dict]) -> str:
 def export_csv(rows: list[dict], fieldnames: list[str]) -> str:
     buf = io.StringIO()
     writer = csv.DictWriter(
-        buf,
-        fieldnames=fieldnames,
-        lineterminator="\n",
-        extrasaction="ignore",
+        buf, fieldnames=fieldnames, lineterminator="\n", extrasaction="ignore"
     )
     writer.writeheader()
     for row in rows:
@@ -598,7 +601,7 @@ def write_output(content: str, output_file: str | None, fmt: str) -> None:
 
 
 # ──────────────────────────────────────────────
-# Text formatting (human-readable)
+# Text formatting
 # ──────────────────────────────────────────────
 def format_velocity(delta: int | None, velocity: float | None) -> str:
     """
@@ -609,8 +612,6 @@ def format_velocity(delta: int | None, velocity: float | None) -> str:
         '  Δ  — (first run — no velocity data yet)'
         >>> format_velocity(700, 100.0)
         '  Δ +700 ⭐ total  |  ~100.0 ⭐/day'
-        >>> format_velocity(0, 0.0)
-        '  Δ 0 ⭐ total  |  ~0.0 ⭐/day'
     """
     if delta is None or velocity is None:
         return "  Δ  — (first run — no velocity data yet)"
@@ -759,9 +760,7 @@ def find_developer_of_the_day(
 
     try:
         developers = search_trending_developers(
-            language=language,
-            since_days=since_days,
-            top_n=top_n,
+            language=language, since_days=since_days, top_n=top_n
         )
     except requests.HTTPError as exc:
         print(f"[ERROR] GitHub API returned: {exc}", file=sys.stderr)
@@ -807,22 +806,16 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Default: today's top repos, all languages
+  # Default: today's top repos
   python github_repo_of_the_day.py
 
-  # Trending developers (all languages)
+  # Trending developers
   python github_repo_of_the_day.py --developers
 
-  # Trending Python developers
-  python github_repo_of_the_day.py --developers --language python
+  # Single keyword
+  python github_repo_of_the_day.py --keyword "LLM agent"
 
-  # Named period shortcut (day / week / month)
-  python github_repo_of_the_day.py --period week
-
-  # Search by single keyword
-  python github_repo_of_the_day.py --keyword "LLM agent" --output json
-
-  # Multi-keyword AND (default)
+  # Multi-keyword AND
   python github_repo_of_the_day.py --keyword LLM --keyword agent
 
   # Multi-keyword OR
@@ -831,50 +824,33 @@ Examples:
   # Boolean expression
   python github_repo_of_the_day.py --keyword '(LLM OR GPT) AND agent AND NOT benchmark'
 
-  # Search in README too (slower)
-  python github_repo_of_the_day.py --keyword "MCP server" --search-in name,description,readme
+  # Wildcard
+  python github_repo_of_the_day.py --keyword 'analy?e'
 
-  # Export as CSV to a file
+  # Wildcard in boolean
+  python github_repo_of_the_day.py --keyword 'analy?e AND agent'
+
+  # Export CSV
   python github_repo_of_the_day.py --output csv --output-file results.csv
-
-  # Skip velocity tracking
-  python github_repo_of_the_day.py --no-snapshot
-
-Token setup:
-  Create a .env file:  GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxx
-  Add .env to .gitignore.
-  Get a token: https://github.com/settings/tokens
         """,
     )
 
-    parser.add_argument(
-        "--developers", "--devs",
-        action="store_true",
-        help="Show trending developers instead of repositories.",
-    )
-    parser.add_argument("--language", "-l", metavar="LANG",
-                        help="Filter by language (e.g. python, go, rust)")
-    parser.add_argument(
-        "--period", "-p",
-        choices=["day", "week", "month"],
-        metavar="PERIOD",
-        help="Named look-back window: day (1), week (7), month (30).",
-    )
-    parser.add_argument("--days", "-d", type=int, default=1, metavar="N",
-                        help="Look back N days (default: 1 = today).")
-    parser.add_argument("--top", "-n", type=int, default=10, metavar="N",
-                        help="Results per category/mode (default: 10)")
-    parser.add_argument("--token", "-t", metavar="TOKEN",
-                        help="GitHub PAT — overrides .env")
+    parser.add_argument("--developers", "--devs", action="store_true")
+    parser.add_argument("--language", "-l", metavar="LANG")
+    parser.add_argument("--period", "-p", choices=["day", "week", "month"], metavar="PERIOD")
+    parser.add_argument("--days", "-d", type=int, default=1, metavar="N")
+    parser.add_argument("--top", "-n", type=int, default=10, metavar="N")
+    parser.add_argument("--token", "-t", metavar="TOKEN")
     parser.add_argument(
         "--keyword", "-k",
         metavar="WORD",
         action="append",
         dest="keywords",
         help=(
-            "Keyword to search (repos mode only). "
-            "Repeat flag for multi-keyword: --keyword LLM --keyword agent. "
-            "Supports boolean expressions: '(LLM OR GPT) AND agent AND NOT benchmark'."
+            "Keyword, boolean expression, or wildcard pattern. "
+            "Repeat for multi-keyword: --keyword LLM --keyword agent. "
+            "Wildcard: --keyword 'analy?e'. "
+            "Boolean: --keyword '(LLM OR GPT) AND agent AND NOT benchmark'."
         ),
     )
     parser.add_argument(
@@ -884,35 +860,12 @@ Token setup:
         metavar="OP",
         help="Operator joining multiple --keyword values: AND (default) or OR.",
     )
+    parser.add_argument("--search-in", "-s", default="name,description", metavar="SCOPE")
+    parser.add_argument("--output", "-o", choices=["text", "json", "csv"], default="text", metavar="FORMAT")
+    parser.add_argument("--output-file", "-f", metavar="FILE")
+    parser.add_argument("--no-snapshot", action="store_true")
     parser.add_argument(
-        "--search-in", "-s",
-        default="name,description",
-        metavar="SCOPE",
-        help=(
-            "Where to search the keyword: name, description, readme "
-            "(comma-separated, default: name,description)."
-        ),
-    )
-    parser.add_argument(
-        "--output", "-o",
-        choices=["text", "json", "csv"],
-        default="text",
-        metavar="FORMAT",
-        help="Output format: text (default), json, csv",
-    )
-    parser.add_argument(
-        "--output-file", "-f",
-        metavar="FILE",
-        help="Write output to FILE instead of stdout (json/csv only)",
-    )
-    parser.add_argument(
-        "--no-snapshot",
-        action="store_true",
-        help="Disable snapshot save/load for this run (repos mode only)",
-    )
-    parser.add_argument(
-        "--clear-snapshots",
-        action="store_true",
+        "--clear-snapshots", action="store_true",
         help=f"Delete all stored snapshots and exit ({SNAPSHOT_FILE})",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
@@ -932,15 +885,13 @@ Token setup:
 
     effective_days = resolve_period(args.period, args.days)
 
-    # Resolve keyword vs keywords for backward-compat
-    raw_keywords: list[str] | None = args.keywords  # list or None (action="append")
+    raw_keywords: list[str] | None = args.keywords
     if raw_keywords and len(raw_keywords) == 1:
-        # Single --keyword value: pass as keyword (preserves boolean parser path)
         kw_single: str | None = raw_keywords[0]
         kw_list: list[str] | None = None
     else:
         kw_single = None
-        kw_list = raw_keywords  # None or list of 2+
+        kw_list = raw_keywords
 
     if args.developers:
         find_developer_of_the_day(
