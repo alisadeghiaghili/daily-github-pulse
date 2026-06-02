@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-daily-github-pulse  v1.7.0
+daily-github-pulse  v1.8.0
 ──────────────────────────
 Discover GitHub's top repositories AND developers of the day — with real star velocity.
 
@@ -53,7 +53,7 @@ except ImportError:
 # ──────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 SNAPSHOT_DIR = Path.home() / ".daily-github-pulse"
 SNAPSHOT_FILE = SNAPSHOT_DIR / "snapshots.json"
 
@@ -68,6 +68,9 @@ PERIOD_DAYS: dict[str, int] = {
 
 # Valid tokens for the --search-in / search_in parameter
 VALID_SEARCH_IN = {"name", "description", "readme"}
+
+# Valid boolean operators for multi-keyword search
+VALID_KEYWORD_OPS = {"AND", "OR"}
 
 # Fields included in JSON / CSV exports (in order)
 EXPORT_FIELDS = [
@@ -148,6 +151,96 @@ def resolve_period(period: str | None, days: int) -> int:
             + ", ".join(PERIOD_DAYS)
         )
     return PERIOD_DAYS[key]
+
+
+# ──────────────────────────────────────────────
+# Keyword qualifier builder
+# ──────────────────────────────────────────────
+def build_keyword_qualifier(
+    keywords: list[str],
+    keyword_op: str = "AND",
+    keyword_not: list[str] | None = None,
+    search_in: str = "name,description",
+) -> str:
+    """
+    Build the keyword fragment of a GitHub Search query string.
+
+    Composes one or more search terms with a boolean operator, appends an
+    ``in:`` scope qualifier exactly once, and optionally appends ``NOT``
+    exclusion terms.
+
+    Each term (positive or negative) is wrapped in double-quotes so that
+    multi-word phrases are treated as exact phrases by GitHub Search and
+    the ``in:`` scope applies to the whole phrase.
+
+    Args:
+        keywords:    One or more search terms.  Empty list returns ``""``.
+        keyword_op:  Boolean connector between positive terms.
+                     ``"AND"`` (default) or ``"OR"`` — case-insensitive,
+                     leading/trailing whitespace stripped.
+        keyword_not: Terms to exclude from results.  Each becomes a
+                     ``NOT "term"`` clause appended after the positive
+                     block.  Default: no exclusions.
+        search_in:   Comma-separated scope for the ``in:`` qualifier.
+                     Valid tokens: ``"name"``, ``"description"``,
+                     ``"readme"``.
+                     Default: ``"name,description"``.
+
+    Returns:
+        Keyword fragment string ready to be appended to a GitHub Search
+        query, e.g. ``'"LLM" AND "agent" in:name,description NOT "benchmark"'``.
+        Returns ``""`` when ``keywords`` is empty.
+
+    Raises:
+        ValueError: If ``keyword_op`` is not ``"AND"`` or ``"OR"``.
+        ValueError: If any token in ``search_in`` is invalid.
+
+    Examples:
+        >>> build_keyword_qualifier(["LLM"])
+        '"LLM" in:name,description'
+        >>> build_keyword_qualifier(["LLM", "agent"], keyword_op="AND")
+        '"LLM" AND "agent" in:name,description'
+        >>> build_keyword_qualifier(["LLM", "GPT"], keyword_op="OR", keyword_not=["survey"])
+        '"LLM" OR "GPT" in:name,description NOT "survey"'
+    """
+    if keyword_not is None:
+        keyword_not = []
+
+    # Validate search_in
+    tokens = {t.strip() for t in search_in.split(",") if t.strip()}
+    invalid = tokens - VALID_SEARCH_IN
+    if invalid:
+        raise ValueError(
+            f"Invalid search_in value(s): {sorted(invalid)}. "
+            f"Valid options: {sorted(VALID_SEARCH_IN)}"
+        )
+
+    # Normalise and validate keyword_op
+    op = keyword_op.strip().upper()
+    if op not in VALID_KEYWORD_OPS:
+        raise ValueError(
+            f"Invalid keyword_op '{keyword_op}'. "
+            f"Valid options: {sorted(VALID_KEYWORD_OPS)}"
+        )
+
+    # Strip each term
+    clean = [kw.strip() for kw in keywords if kw.strip()]
+    if not clean:
+        return ""
+
+    # Join positive terms
+    joined = f" {op} ".join(f'"{kw}"' for kw in clean)
+
+    # Append in: scope (exactly once)
+    result = f"{joined} in:{search_in}"
+
+    # Append NOT exclusions
+    for term in keyword_not:
+        t = term.strip()
+        if t:
+            result += f' NOT "{t}"'
+
+    return result
 
 
 # ──────────────────────────────────────────────
@@ -300,6 +393,9 @@ def search_trending_repos(
     since_days: int = 1,
     top_n: int = 10,
     keyword: str | None = None,
+    keywords: list[str] | None = None,
+    keyword_op: str = "AND",
+    keyword_not: list[str] | None = None,
     search_in: str = "name,description",
 ) -> dict:
     """
@@ -307,54 +403,68 @@ def search_trending_repos(
 
     Two operating modes with different category labels and star thresholds:
 
-    Browse mode (no keyword)
-    ────────────────────────
+    Browse mode (no keyword / keywords)
+    ─────────────────────────────────────
     - New Today     — recently created repos with >10 stars.
-                      Low threshold is intentional: the user is exploring,
-                      not filtering. Recency is the primary signal.
     - Active Giants — recently pushed repos with >1000 stars.
-                      High threshold keeps only established, high-quality repos.
 
-    Search mode (keyword provided)
-    ───────────────────────────────
+    Search mode (keyword or keywords provided)
+    ───────────────────────────────────────────
     - New & Relevant    — recently created repos with >50 stars.
-                          Raised from 10 to reduce low-quality noise when the
-                          user has a specific topic in mind.
     - Active & Relevant — recently pushed repos with >500 stars.
-                          Lowered from 1000 to widen coverage for niche topics
-                          while still filtering out low-quality repos.
 
-    Both modes preserve the time dimension: ``since_days`` / ``--period``
-    is always applied via ``created:>=`` or ``pushed:>=``.
+    Multi-keyword boolean search (``keywords`` parameter)
+    ──────────────────────────────────────────────────────
+    Pass a list of terms with ``keywords`` plus an optional ``keyword_op``
+    (``"AND"`` or ``"OR"``).  Terms are quoted and joined, e.g.:
 
-    Keyword quoting
-    ───────────────
-    The keyword is wrapped in double-quotes before being appended to the
-    query string.  This ensures multi-word phrases (e.g. ``"LLM agent"``)
-    are treated as an exact phrase by GitHub Search rather than two
-    independent terms where only the last token inherits the ``in:`` scope
-    qualifier.
+      keywords=["LLM", "agent"], keyword_op="AND"
+      → ``"LLM" AND "agent" in:name,description``
+
+      keywords=["LLM", "GPT"], keyword_op="OR"
+      → ``"LLM" OR "GPT" in:name,description``
+
+    Use ``keyword_not`` to exclude noisy terms:
+
+      keyword_not=["benchmark", "survey"]
+      → appends ``NOT "benchmark" NOT "survey"``
+
+    Note: ``keyword`` (single string, legacy) and ``keywords`` (list) are
+    mutually exclusive.  Providing both raises ``ValueError``.
 
     Args:
-        language:   Optional language filter (e.g. "python", "rust").
-        since_days: Days to look back (default: 1 = today).
-        top_n:      Max results per category; GitHub hard limit is 100.
-        keyword:    Optional keyword to match against repo metadata.
-        search_in:  Comma-separated search scope for keyword.
-                    Valid tokens: ``"name"``, ``"description"``, ``"readme"``.
-                    Default: ``"name,description"``.
-                    Warning: ``"readme"`` is significantly slower.
+        language:    Optional language filter (e.g. "python", "rust").
+        since_days:  Days to look back (default: 1 = today).
+        top_n:       Max results per category; GitHub hard limit is 100.
+        keyword:     Single keyword string (legacy, mutually exclusive with
+                     ``keywords``).
+        keywords:    List of keyword terms for boolean search.  Empty list
+                     falls back to browse mode.
+        keyword_op:  Boolean connector for ``keywords``: ``"AND"`` (default)
+                     or ``"OR"``.
+        keyword_not: Terms to exclude.  Each becomes ``NOT "term"`` in the
+                     query.
+        search_in:   Comma-separated search scope.  Valid tokens:
+                     ``"name"``, ``"description"``, ``"readme"``.
+                     Default: ``"name,description"``.
 
     Returns:
         dict: {category_label: [repo_dict, ...]}
 
     Raises:
-        ValueError: If any token in ``search_in`` is not one of
-                    ``name``, ``description``, ``readme``.
+        ValueError: If both ``keyword`` and ``keywords`` are provided.
+        ValueError: If any token in ``search_in`` is not valid.
+        ValueError: If ``keyword_op`` is not ``"AND"`` or ``"OR"``.
         requests.HTTPError, requests.ConnectionError, requests.Timeout
     """
-    # Validate search_in tokens up-front so invalid values fail fast
-    # instead of silently producing unrelated results from the API.
+    # Guard: keyword and keywords are mutually exclusive
+    if keyword is not None and keywords is not None:
+        raise ValueError(
+            "'keyword' and 'keywords' are mutually exclusive. "
+            "Use 'keywords' (list) for boolean search, or 'keyword' (str) for simple search."
+        )
+
+    # Validate search_in tokens up-front
     tokens = {t.strip() for t in search_in.split(",") if t.strip()}
     invalid = tokens - VALID_SEARCH_IN
     if invalid:
@@ -364,17 +474,27 @@ def search_trending_repos(
         )
 
     since_date = (date.today() - timedelta(days=since_days)).isoformat()
-    # Wrap in double-quotes: multi-word phrases like "LLM agent" must be
-    # quoted so GitHub Search treats them as a phrase and the in: qualifier
-    # applies to the whole phrase, not just the last token.
-    keyword_qualifier = f' "{keyword}" in:{search_in}' if keyword else ""
 
-    if keyword:
-        # Search mode: user has a specific topic in mind.
-        # stars:>50  on new repos  — filters low-quality noise while keeping
-        #            genuinely new projects that gained traction.
-        # stars:>500 on active repos — broad enough to cover niche topics,
-        #            strict enough to avoid repos with zero activity history.
+    # Build keyword qualifier
+    if keywords is not None:
+        # New multi-keyword path
+        keyword_qualifier = (
+            " " + build_keyword_qualifier(
+                keywords,
+                keyword_op=keyword_op,
+                keyword_not=keyword_not or [],
+                search_in=search_in,
+            )
+            if keywords
+            else ""
+        )
+        is_search_mode = bool(keywords)
+    else:
+        # Legacy single-keyword path (backward compat)
+        keyword_qualifier = f' "{keyword}" in:{search_in}' if keyword else ""
+        is_search_mode = bool(keyword)
+
+    if is_search_mode:
         queries = {
             "New & Relevant": (
                 f"created:>={since_date} stars:>50{keyword_qualifier}"
@@ -384,9 +504,6 @@ def search_trending_repos(
             ),
         }
     else:
-        # Browse mode: user is exploring, not filtering.
-        # stars:>10   on new repos  — intentionally low; recency is the signal.
-        # stars:>1000 on active repos — keeps only established giants.
         queries = {
             "New Today": f"created:>={since_date} stars:>10",
             "Active Giants": f"pushed:>={since_date} stars:>1000",
@@ -499,7 +616,6 @@ def search_trending_developers(
             detail_resp.raise_for_status()
             enriched.append(detail_resp.json())
         except requests.RequestException:
-            # Fall back to basic search result if detail fetch fails
             enriched.append(user)
 
     return enriched
@@ -737,6 +853,9 @@ def find_repo_of_the_day(
     since_days: int = 1,
     top_n: int = 10,
     keyword: str | None = None,
+    keywords: list[str] | None = None,
+    keyword_op: str = "AND",
+    keyword_not: list[str] | None = None,
     search_in: str = "name,description",
     use_snapshots: bool = True,
     output_fmt: Literal["text", "json", "csv"] = "text",
@@ -756,12 +875,14 @@ def find_repo_of_the_day(
         language:    Language filter. Default: None (all languages).
         since_days:  Days to look back. Default: 1.
         top_n:       Repos per category. Default: 10.
-        keyword:     Keyword filter. Default: None.
-        search_in:   Search scope for keyword. Default: "name,description".
+        keyword:     Single keyword (legacy). Default: None.
+        keywords:    List of keywords for boolean search. Default: None.
+        keyword_op:  Boolean connector for keywords: AND (default) or OR.
+        keyword_not: Exclusion terms. Default: None.
+        search_in:   Search scope for keyword(s). Default: "name,description".
         use_snapshots: Load/save velocity snapshots. Default: True.
         output_fmt:  Output format: "text" (default), "json", or "csv".
         output_file: Write output to this file path instead of stdout.
-                     Confirmation message is printed to stderr.
 
     Returns:
         None
@@ -774,7 +895,13 @@ def find_repo_of_the_day(
         print(f"  daily-github-pulse v{VERSION}  —  {date.today().isoformat()}")
         if language:
             print(f"  Language : {language}")
-        if keyword:
+        if keywords:
+            op_label = keyword_op.upper()
+            kw_display = f" {op_label} ".join(keywords)
+            print(f"  Keywords : {kw_display}  in [{search_in}]")
+            if keyword_not:
+                print(f"  Exclude  : {', '.join(keyword_not)}")
+        elif keyword:
             print(f"  Keyword  : '{keyword}'  in [{search_in}]")
         auth = "Authenticated" if GITHUB_TOKEN else "Unauthenticated (60 req/hr limit)"
         print(f"  Auth     : {auth}")
@@ -790,6 +917,9 @@ def find_repo_of_the_day(
             since_days=since_days,
             top_n=top_n,
             keyword=keyword,
+            keywords=keywords,
+            keyword_op=keyword_op,
+            keyword_not=keyword_not,
             search_in=search_in,
         )
     except requests.HTTPError as exc:
@@ -957,11 +1087,20 @@ Examples:
   # JSON export, pipe into jq
   python github_repo_of_the_day.py --output json | jq '.[].full_name'
 
-  # Search by keyword (search mode: higher thresholds, less noise)
+  # Single keyword search (legacy)
   python github_repo_of_the_day.py --keyword "LLM agent" --output json
 
+  # Multi-keyword AND search
+  python github_repo_of_the_day.py --keywords LLM agent --keyword-op AND
+
+  # Multi-keyword OR search
+  python github_repo_of_the_day.py --keywords LLM GPT Claude --keyword-op OR
+
+  # Multi-keyword with exclusions
+  python github_repo_of_the_day.py --keywords LLM agent --keyword-not benchmark survey
+
   # Search in README too (slower)
-  python github_repo_of_the_day.py --keyword "MCP server" --search-in name,description,readme
+  python github_repo_of_the_day.py --keywords MCP server --search-in name,description,readme
 
   # Skip velocity tracking
   python github_repo_of_the_day.py --no-snapshot
@@ -998,7 +1137,30 @@ Token setup:
     parser.add_argument("--token", "-t", metavar="TOKEN",
                         help="GitHub PAT — overrides .env")
     parser.add_argument("--keyword", "-k", metavar="WORD",
-                        help="Keyword to search (repos mode only)")
+                        help="Single keyword to search (repos mode only). "
+                             "Mutually exclusive with --keywords.")
+    parser.add_argument(
+        "--keywords",
+        nargs="+",
+        metavar="WORD",
+        help="One or more keywords for boolean search (repos mode only). "
+             "Use --keyword-op to set AND/OR connector. "
+             "Mutually exclusive with --keyword.",
+    )
+    parser.add_argument(
+        "--keyword-op",
+        default="AND",
+        metavar="OP",
+        choices=["AND", "OR", "and", "or"],
+        help="Boolean connector for --keywords: AND (default) or OR.",
+    )
+    parser.add_argument(
+        "--keyword-not",
+        nargs="+",
+        metavar="WORD",
+        help="Terms to exclude from results (NOT clause). "
+             "Used together with --keywords.",
+    )
     parser.add_argument(
         "--search-in", "-s",
         default="name,description",
@@ -1046,6 +1208,10 @@ Token setup:
             print("No snapshot file found.")
         sys.exit(0)
 
+    # Validate mutually exclusive keyword flags
+    if args.keyword and args.keywords:
+        parser.error("--keyword and --keywords are mutually exclusive.")
+
     effective_days = resolve_period(args.period, args.days)
 
     if args.developers:
@@ -1062,6 +1228,9 @@ Token setup:
             since_days=effective_days,
             top_n=args.top,
             keyword=args.keyword,
+            keywords=args.keywords,
+            keyword_op=args.keyword_op,
+            keyword_not=args.keyword_not,
             search_in=args.search_in,
             use_snapshots=not args.no_snapshot,
             output_fmt=args.output,

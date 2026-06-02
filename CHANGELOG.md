@@ -10,6 +10,66 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.8.0] - 2026-06-02
+
+### Added
+- **`build_keyword_qualifier()`** — new pure function that composes a GitHub
+  Search keyword fragment from one or more terms, a boolean operator, optional
+  exclusions, and a scope qualifier:
+  - Each term (positive or negative) is wrapped in `"double quotes"` so
+    multi-word phrases are exact-matched and the `in:` scope applies to the
+    whole phrase, not just the last token.
+  - Terms are joined with `" AND "` or `" OR "` (controlled by `keyword_op`).
+  - The `in:<search_in>` qualifier is appended exactly **once**, regardless
+    of how many keywords are provided.
+  - Exclusion terms are appended as `NOT "term"` after the positive block.
+  - `keywords=[]` returns `""` (empty list → browse mode).
+  - `keyword_op` is normalised to uppercase; leading/trailing whitespace
+    stripped.  Invalid values raise `ValueError` listing `AND` and `OR`.
+  - Delegates `search_in` validation to the existing `VALID_SEARCH_IN` set.
+- **`search_trending_repos()`** — three new parameters:
+  - `keywords: list[str]` — multi-keyword list; replaces the legacy `keyword`
+    string for boolean search.  Empty list falls back to browse mode.
+  - `keyword_op: str` — boolean connector, `"AND"` (default) or `"OR"`.
+  - `keyword_not: list[str]` — exclusion terms; each becomes a `NOT "term"`
+    clause in both generated queries.
+  - `keyword` (legacy single-string param) is preserved for full backward
+    compatibility.  Supplying both `keyword` and `keywords` raises `ValueError`.
+- **`find_repo_of_the_day()`** updated to accept and pass through the new
+  `keywords`, `keyword_op`, and `keyword_not` parameters.  Header now prints
+  the full boolean expression and exclusions when `keywords` is used.
+- **CLI flags**:
+  - `--keywords WORD [WORD ...]` — one or more search terms (nargs=`+`).
+    Mutually exclusive with `--keyword`.
+  - `--keyword-op {AND,OR}` — connector between terms (default: `AND`).
+  - `--keyword-not WORD [WORD ...]` — terms to exclude (NOT clauses).
+- **`VALID_KEYWORD_OPS`** constant — single source of truth: `{"AND", "OR"}`.
+- Version bumped `1.7.0 → 1.8.0`.
+
+### Tests
+- **`TestBuildKeywordQualifier`** — 25 new TDD tests covering:
+  single keyword quoting, multi-word phrase handling, default `in:` scope,
+  AND joining (2 and 3 terms), OR joining (2 and 3 terms),
+  `keyword_op` case-insensitivity and whitespace normalisation,
+  invalid `keyword_op` `ValueError`,
+  single/multiple `keyword_not` terms, NOT placement after positive block,
+  multi-word NOT phrase quoting, empty `keyword_not` produces no NOT clause,
+  AND+NOT and OR+NOT combinations,
+  empty keywords list returns `""`, NOT-only (empty positive) returns `""`,
+  leading/trailing whitespace stripped from terms,
+  `in:` qualifier appears exactly once,
+  invalid `search_in` raises `ValueError`.
+- **`TestSearchTrendingReposMultiKeyword`** — 9 new integration tests covering:
+  AND query shape, OR query shape, `keyword_not` NOT clause in both queries,
+  multi-keyword triggers search mode categories,
+  time filter preserved with multiple keywords,
+  `in:` qualifier appears exactly once per query,
+  `keyword` + `keywords` together raises `ValueError`,
+  empty `keywords=[]` falls back to browse mode,
+  single-item list equivalent to legacy `keyword`.
+
+---
+
 ## [1.5.0] - 2026-06-01
 
 ### Added
