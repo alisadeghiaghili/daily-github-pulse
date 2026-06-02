@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-daily-github-pulse  v2.0.0
+daily-github-pulse  v2.1.0
 ──────────────────────────
 Discover GitHub's top repositories AND developers of the day — with real star velocity.
 
@@ -30,9 +30,17 @@ Token priority
   2. GITHUB_TOKEN environment variable / .env file
   3. Unauthenticated  →  60 req/hr limit
 
+Keyword search modes
+────────────────────
+  --keyword      Single term (legacy).  Searches name+description by default.
+  --keywords     Multiple terms joined with AND/OR via --keyword-op.
+  --bool-query   Full boolean expression with AND, OR, NOT, parentheses.
+                 Parsed into an AST and sent through its own dedicated path —
+                 NOT converted to a raw string before being passed down.
+
 Wildcard expansion
 ──────────────────
-  Pass --wildcard to expand ? and * patterns in keywords before building
+  Pass --wildcard to expand ? and * patterns in --keywords before building
   the GitHub query.  Expansion is done client-side against the NLTK words
   corpus (auto-downloaded on first use).  Requires: pip install nltk
 
@@ -66,7 +74,7 @@ except ImportError:
 # ──────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 SNAPSHOT_DIR = Path.home() / ".daily-github-pulse"
 SNAPSHOT_FILE = SNAPSHOT_DIR / "snapshots.json"
 
@@ -214,7 +222,6 @@ def parse_boolean_query(expr: str) -> Union[Term, BoolNode]:
     tokens = _tokenise(expr)
     ast, pos = _parse_expr(tokens, 0)
     if pos != len(tokens):
-        # Unconsumed tokens mean a stray closing paren or similar
         raise ValueError(
             f"parse_boolean_query: unexpected token '{tokens[pos]}' "
             f"at position {pos}."
@@ -255,20 +262,19 @@ def _parse_expr(
 
     A group's top-level operator must be homogeneous (all AND or all OR).
     Mixing operators at the same nesting level without parens raises
-    ValueError — the caller must use parentheses.
+    ValueError.
 
     Returns:
         (node, new_pos)
     """
     children: list[Union[Term, BoolNode]] = []
     op: str | None = None
-    last_was_operand = False  # used to detect consecutive terms
+    last_was_operand = False
 
     while pos < len(tokens):
         tok = tokens[pos]
         upper = tok.upper()
 
-        # ── closing paren — end of group
         if tok == ")":
             if not inside_group:
                 raise ValueError(
@@ -277,7 +283,6 @@ def _parse_expr(
                 )
             break
 
-        # ── binary operator (AND / OR)
         if upper in ("AND", "OR"):
             if not children:
                 raise ValueError(
@@ -294,7 +299,6 @@ def _parse_expr(
             pos += 1
             continue
 
-        # ── NOT prefix
         negated = False
         if upper == "NOT":
             pos += 1
@@ -306,7 +310,6 @@ def _parse_expr(
             negated = True
             tok = tokens[pos]
 
-        # ── two consecutive operands without operator
         if last_was_operand:
             raise ValueError(
                 f"parse_boolean_query: missing operator before '{tok}' "
@@ -314,9 +317,8 @@ def _parse_expr(
                 "Did you forget AND or OR?"
             )
 
-        # ── grouped sub-expression
         if tok == "(":
-            pos += 1  # consume '('
+            pos += 1
             if pos >= len(tokens):
                 raise ValueError(
                     "parse_boolean_query: unbalanced parentheses — "
@@ -328,10 +330,8 @@ def _parse_expr(
                     "parse_boolean_query: unbalanced parentheses — "
                     "'(' was never closed."
                 )
-            pos += 1  # consume ')'
+            pos += 1
             children.append(child)
-
-        # ── plain term (bare word or quoted phrase)
         else:
             value = tok.strip('"')
             children.append(Term(value=value, negated=negated))
@@ -339,14 +339,12 @@ def _parse_expr(
 
         last_was_operand = True
 
-    # ── validate after consuming all tokens in this scope
     if not children:
         raise ValueError(
             "parse_boolean_query: expression is empty or contains only operators."
         )
 
     if op is not None and len(children) == 1:
-        # Dangling operator: we consumed an OP but got no RHS before scope end
         raise ValueError(
             f"parse_boolean_query: dangling operator '{op}' — "
             "no right-hand operand."
@@ -356,8 +354,6 @@ def _parse_expr(
         return children[0], pos
 
     if op is None:
-        # Two+ children appeared without any operator between them;
-        # this path is guarded by last_was_operand, but keep as safety net.
         raise ValueError(
             "parse_boolean_query: missing operator between terms."
         )
@@ -416,19 +412,13 @@ def expand_wildcards(
     Args:
         term:         Keyword string that may contain ``?`` and/or ``*``.
         wordlist:     Pre-loaded word set (``set[str]``, lower-cased).
-                      Pass ``None`` to trigger lazy loading (calls
-                      ``_load_wordlist()`` internally).  Reuse the same
-                      set across multiple calls for efficiency.
-        max_variants: Upper bound on the number of variants returned.
-                      Prevents query-string explosion for broad patterns
-                      like ``a*``.  Default: 20.
+                      Pass ``None`` to trigger lazy loading.
+        max_variants: Upper bound on variants returned.  Default: 20.
 
     Returns:
         List of matching words (lower-cased, deduplicated, sorted).
-        Returns ``[term]`` unchanged when:
-          - the term contains no wildcards, or
-          - NLTK is unavailable, or
-          - no matches are found (avoids silent zero-result queries).
+        Returns ``[term]`` unchanged when no wildcards, NLTK unavailable,
+        or no matches found.
 
     Examples:
         >>> expand_wildcards("analy?e")       # doctest: +SKIP
@@ -438,20 +428,15 @@ def expand_wildcards(
         >>> expand_wildcards("optimiz*")      # doctest: +SKIP
         ['optimize', 'optimized', 'optimizes', 'optimizing', ...]
     """
-    # Fast path: no wildcard characters present
     if "?" not in term and "*" not in term:
         return [term]
 
-    # Load wordlist lazily if caller did not supply one
     if wordlist is None:
         wordlist = _load_wordlist()
 
-    # Graceful fallback when NLTK is not installed
     if wordlist is None:
         return [term]
 
-    # Build a regex: ? → one char, * → zero-or-more chars
-    # Escape everything else so dots/parens in terms don't misbehave
     escaped = re.escape(term)
     pattern = (
         escaped
@@ -464,8 +449,6 @@ def expand_wildcards(
         {w for w in wordlist if regex.match(w)}
     )[:max_variants]
 
-    # If the pattern matches nothing, keep the original term as-is so the
-    # caller's query still runs (better a near-miss than zero results).
     return matches if matches else [term]
 
 
@@ -484,17 +467,12 @@ def apply_wildcards_to_keywords(
 
     Keywords without wildcards are returned unchanged.
 
-    The wordlist is loaded once and reused for all terms in the list,
-    avoiding redundant corpus loads.
-
     Args:
         keywords: List of raw keyword strings (may contain wildcards).
-        wordlist: Pre-loaded word set for ``expand_wildcards()``.  When
-                  ``None``, the corpus is loaded once internally.
+        wordlist: Pre-loaded word set.  When ``None``, corpus is loaded once.
 
     Returns:
-        New list of the same length where wildcard terms have been
-        replaced by their ``(v1 OR v2 OR ...)`` expansions.
+        New list where wildcard terms have been replaced by their expansions.
 
     Examples:
         >>> apply_wildcards_to_keywords(["analy?e", "agent"])  # doctest: +SKIP
@@ -503,9 +481,8 @@ def apply_wildcards_to_keywords(
         ['agent']
     """
     if not any("?" in kw or "*" in kw for kw in keywords):
-        return keywords  # fast path: nothing to expand
+        return keywords
 
-    # Load corpus once for all terms
     wl = wordlist if wordlist is not None else _load_wordlist()
 
     result: list[str] = []
@@ -515,7 +492,6 @@ def apply_wildcards_to_keywords(
         else:
             variants = expand_wildcards(kw, wordlist=wl)
             if len(variants) == 1 and variants[0] == kw:
-                # No expansion possible — pass through unchanged
                 result.append(kw)
             else:
                 result.append("(" + " OR ".join(variants) + ")")
@@ -541,11 +517,10 @@ def resolve_period(period: str | None, days: int) -> int:
     Resolve the effective look-back window in days.
 
     ``--period`` takes precedence over ``--days`` when both are supplied.
-    Valid period tokens are ``day`` (1), ``week`` (7), and ``month`` (30).
 
     Args:
         period: Named period string (``"day"``, ``"week"``, ``"month"``),
-                or ``None`` when ``--period`` was not used.
+                or ``None``.
         days:   Numeric fallback from ``--days`` (default: 1).
 
     Returns:
@@ -559,8 +534,6 @@ def resolve_period(period: str | None, days: int) -> int:
         7
         >>> resolve_period(None, 3)
         3
-        >>> resolve_period("month", 99)
-        30
     """
     if period is None:
         return days
@@ -594,21 +567,18 @@ def _serialise_node(node: Union[Term, BoolNode]) -> str:
 
     Inner BoolNodes are wrapped in parentheses to preserve operator
     precedence.  The ``in:`` scope qualifier is NOT appended here —
-    it is added exactly once by ``build_keyword_qualifier()`` at the
-    outermost level.
+    it is added exactly once by ``build_keyword_qualifier()``.
 
     Args:
         node: A ``Term`` or ``BoolNode`` from ``parse_boolean_query()``.
 
     Returns:
-        Query fragment string, e.g. ``'("LLM" OR "GPT")'`` or
-        ``'NOT "benchmark"'``.
+        Query fragment string, e.g. ``'("LLM" OR "GPT")'``.
     """
     if isinstance(node, Term):
         quoted = f'"{node.value}"'
         return f'NOT {quoted}' if node.negated else quoted
 
-    # BoolNode — recurse, wrapping each BoolNode child in parens
     parts = []
     for child in node.children:
         if isinstance(child, BoolNode):
@@ -627,49 +597,29 @@ def build_keyword_qualifier(
     """
     Build the keyword fragment of a GitHub Search query string.
 
-    Accepts either a plain ``list[str]`` of terms (legacy path) or a
-    pre-parsed ``Term`` / ``BoolNode`` AST node from
-    ``parse_boolean_query()`` (AST path).
+    Accepts either a plain ``list[str]`` of terms or a pre-parsed
+    ``Term`` / ``BoolNode`` AST node from ``parse_boolean_query()``.
 
-    **List path** — composes one or more search terms with a boolean
-    operator, appends an ``in:`` scope qualifier exactly once, and
-    optionally appends ``NOT`` exclusion terms.
+    **List path** — composes terms with a boolean operator, appends
+    ``in:`` scope, and optionally appends NOT exclusion terms.
 
     **AST path** — serialises the AST directly and appends ``in:`` once.
-    ``keyword_op`` and ``keyword_not`` are ignored when an AST node is
-    passed (exclusions should be modelled as ``Term(negated=True)`` nodes
-    inside the AST).
-
-    Each term (positive or negative) is wrapped in double-quotes so that
-    multi-word phrases are treated as exact phrases by GitHub Search and
-    the ``in:`` scope applies to the whole phrase.
+    ``keyword_op`` and ``keyword_not`` are ignored (model exclusions as
+    ``Term(negated=True)`` nodes inside the AST).
 
     Args:
-        keywords:    ``list[str]`` of search terms, a ``Term``, or a
-                     ``BoolNode``.  Empty list returns ``""``.
-        keyword_op:  Boolean connector between positive terms when
-                     ``keywords`` is a list.
-                     ``"AND"`` (default) or ``"OR"`` — case-insensitive,
-                     leading/trailing whitespace stripped.
-                     Ignored for AST input.
-        keyword_not: Terms to exclude from results when ``keywords`` is a
-                     list.  Each becomes a ``NOT "term"`` clause appended
-                     after the positive block.  Default: no exclusions.
-                     Ignored for AST input.
-        search_in:   Comma-separated scope for the ``in:`` qualifier.
-                     Valid tokens: ``"name"``, ``"description"``,
-                     ``"readme"``.
-                     Default: ``"name,description"``.
+        keywords:    ``list[str]``, a ``Term``, or a ``BoolNode``.
+        keyword_op:  Connector for list path: ``"AND"`` or ``"OR"``.
+        keyword_not: Exclusion terms for list path.
+        search_in:   Comma-separated scope.  Valid: ``name``, ``description``,
+                     ``readme``.  Default: ``"name,description"``.
 
     Returns:
-        Keyword fragment string ready to be appended to a GitHub Search
-        query, e.g.
-        ``'"LLM" AND "agent" in:name,description NOT "benchmark"'``.
-        Returns ``""`` when ``keywords`` is an empty list.
+        Keyword fragment ready to append to a GitHub Search query.
+        Returns ``""`` for an empty list.
 
     Raises:
-        ValueError: If ``keyword_op`` is not ``"AND"`` or ``"OR"``
-                    (list path only).
+        ValueError: If ``keyword_op`` is invalid (list path).
         ValueError: If any token in ``search_in`` is invalid.
 
     Examples:
@@ -677,24 +627,21 @@ def build_keyword_qualifier(
         '"LLM" in:name,description'
         >>> build_keyword_qualifier(["LLM", "agent"], keyword_op="AND")
         '"LLM" AND "agent" in:name,description'
-        >>> build_keyword_qualifier(["LLM", "GPT"], keyword_op="OR", keyword_not=["survey"])
-        '"LLM" OR "GPT" in:name,description NOT "survey"'
         >>> ast = parse_boolean_query('(LLM OR GPT) AND agent AND NOT benchmark')
-        >>> build_keyword_qualifier(ast, search_in="name,description")
+        >>> build_keyword_qualifier(ast)
         '("LLM" OR "GPT") AND "agent" AND NOT "benchmark" in:name,description'
     """
     _validate_search_in(search_in)
 
-    # ── AST path ────────────────────────────────────────────────────────────
+    # ── AST path ─────────────────────────────────────────────────────────────
     if isinstance(keywords, (Term, BoolNode)):
         body = _serialise_node(keywords)
         return f"{body} in:{search_in}"
 
-    # ── list[str] path ───────────────────────────────────────────────────────
+    # ── list[str] path ────────────────────────────────────────────────────────
     if keyword_not is None:
         keyword_not = []
 
-    # Normalise and validate keyword_op
     op = keyword_op.strip().upper()
     if op not in VALID_KEYWORD_OPS:
         raise ValueError(
@@ -702,18 +649,13 @@ def build_keyword_qualifier(
             f"Valid options: {sorted(VALID_KEYWORD_OPS)}"
         )
 
-    # Strip each term
     clean = [kw.strip() for kw in keywords if kw.strip()]
     if not clean:
         return ""
 
-    # Join positive terms
     joined = f" {op} ".join(f'"{kw}"' for kw in clean)
-
-    # Append in: scope (exactly once)
     result = f"{joined} in:{search_in}"
 
-    # Append NOT exclusions
     for term in keyword_not:
         t = term.strip()
         if t:
@@ -773,7 +715,7 @@ def star_delta(repo: dict, snapshots: dict) -> int | None:
         snapshots: loaded snapshot data.
 
     Returns:
-        int delta, or None if no previous snapshot exists for this repo.
+        int delta, or None if no previous snapshot exists.
 
     Examples:
         >>> snapshots = {"owner/repo": {"stars": 12400, "saved_at": "..."}}
@@ -791,25 +733,20 @@ def elapsed_days(snapshots: dict, full_name: str) -> float | None:
     """
     Return the number of days elapsed since the snapshot was saved.
 
-    Parses the ``saved_at`` ISO timestamp stored in the snapshot entry and
-    computes the difference against the current UTC time.
-
     Args:
-        snapshots:  loaded snapshot data (from ``load_snapshots()``).
+        snapshots:  loaded snapshot data.
         full_name:  repository full name, e.g. ``"owner/repo"``.
 
     Returns:
         Elapsed time in fractional days (always > 0), or ``None`` if the
-        repo has no snapshot entry or the ``saved_at`` field is missing /
-        unparseable.
+        repo has no snapshot or ``saved_at`` is missing/unparseable.
 
     Examples:
-        >>> import json
         >>> from datetime import datetime, timezone, timedelta
         >>> ts = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
         >>> snaps = {"owner/repo": {"stars": 100, "saved_at": ts}}
         >>> days = elapsed_days(snaps, "owner/repo")
-        >>> 0.4 < days < 0.6  # roughly 0.5 day
+        >>> 0.4 < days < 0.6
         True
     """
     entry = snapshots.get(full_name)
@@ -833,21 +770,14 @@ def daily_velocity(repo: dict, snapshots: dict) -> float | None:
     """
     Compute the time-normalised star growth rate in stars per day.
 
-    Unlike ``star_delta()``, this value stays meaningful regardless of how
-    long ago the snapshot was taken.  A repo that gained 1 400 stars over
-    14 days reports a ``daily_velocity`` of 100.0, the same as a repo that
-    gained 100 stars today.
-
     Args:
         repo:      repo dict from GitHub API.
         snapshots: loaded snapshot data.
 
     Returns:
-        Stars per day rounded to one decimal place, or ``None`` when no
-        previous snapshot exists for this repo (first run).
+        Stars per day rounded to one decimal place, or ``None`` on first run.
 
     Examples:
-        >>> import json
         >>> from datetime import datetime, timezone, timedelta
         >>> ts = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
         >>> snaps = {"owner/repo": {"stars": 12400, "saved_at": ts}}
@@ -876,81 +806,79 @@ def search_trending_repos(
     keyword_op: str = "AND",
     keyword_not: list[str] | None = None,
     search_in: str = "name,description",
+    bool_query: Union[Term, BoolNode, None] = None,
 ) -> dict:
     """
     Query the GitHub Search API and return top repositories by category.
 
-    Two operating modes with different category labels and star thresholds:
+    Three keyword input modes (mutually exclusive):
 
-    Browse mode (no keyword / keywords)
-    ─────────────────────────────────────
-    - New Today     — recently created repos with >10 stars.
-    - Active Giants — recently pushed repos with >1000 stars.
+    1. ``keyword`` (str)  — single-term legacy path.
+    2. ``keywords`` (list[str])  — multi-term boolean path via
+       ``build_keyword_qualifier()``.
+    3. ``bool_query`` (Term | BoolNode)  — pre-parsed AST path.
+       ``build_keyword_qualifier()`` is called with the AST directly;
+       ``search_in`` is honoured, ``keyword_op``/``keyword_not`` are
+       ignored (model those inside the AST instead).
 
-    Search mode (keyword or keywords provided)
-    ───────────────────────────────────────────
-    - New & Relevant    — recently created repos with >50 stars.
-    - Active & Relevant — recently pushed repos with >500 stars.
+    Browse mode (no keyword input)
+    ────────────────────────────────
+    - New Today     — created today, >10 stars.
+    - Active Giants — pushed today, >1000 stars.
 
-    Multi-keyword boolean search (``keywords`` parameter)
-    ──────────────────────────────────────────────────────
-    Pass a list of terms with ``keywords`` plus an optional ``keyword_op``
-    (``"AND"`` or ``"OR"``).  Terms are quoted and joined, e.g.:
-
-      keywords=["LLM", "agent"], keyword_op="AND"
-      → ``"LLM" AND "agent" in:name,description``
-
-      keywords=["LLM", "GPT"], keyword_op="OR"
-      → ``"LLM" OR "GPT" in:name,description``
-
-    Use ``keyword_not`` to exclude noisy terms:
-
-      keyword_not=["benchmark", "survey"]
-      → appends ``NOT "benchmark" NOT "survey"``
-
-    Note: ``keyword`` (single string, legacy) and ``keywords`` (list) are
-    mutually exclusive.  Providing both raises ``ValueError``.
+    Search mode (any keyword input)
+    ─────────────────────────────────
+    - New & Relevant    — created recently, >50 stars.
+    - Active & Relevant — pushed recently, >500 stars.
 
     Args:
-        language:    Optional language filter (e.g. "python", "rust").
-        since_days:  Days to look back (default: 1 = today).
-        top_n:       Max results per category; GitHub hard limit is 100.
-        keyword:     Single keyword string (legacy, mutually exclusive with
-                     ``keywords``).
-        keywords:    List of keyword terms for boolean search.  Empty list
-                     falls back to browse mode.
-        keyword_op:  Boolean connector for ``keywords``: ``"AND"`` (default)
-                     or ``"OR"``.
-        keyword_not: Terms to exclude.  Each becomes ``NOT "term"`` in the
-                     query.
-        search_in:   Comma-separated search scope.  Valid tokens:
-                     ``"name"``, ``"description"``, ``"readme"``.
-                     Default: ``"name,description"``.
+        language:    Language filter (e.g. "python").
+        since_days:  Days to look back (default: 1).
+        top_n:       Max results per category (default: 10).
+        keyword:     Single keyword string (legacy).
+        keywords:    List of keyword terms for boolean search.
+        keyword_op:  Connector for ``keywords``: ``"AND"`` or ``"OR"``.
+        keyword_not: Exclusion terms for ``keywords`` path.
+        search_in:   Comma-separated search scope.  Valid: ``name``,
+                     ``description``, ``readme``.  Default:
+                     ``"name,description"``.
+        bool_query:  Pre-parsed AST from ``parse_boolean_query()``.  When
+                     provided, ``keyword_op`` and ``keyword_not`` are ignored.
 
     Returns:
         dict: {category_label: [repo_dict, ...]}
 
     Raises:
-        ValueError: If both ``keyword`` and ``keywords`` are provided.
-        ValueError: If any token in ``search_in`` is not valid.
+        ValueError: If more than one keyword input mode is active.
+        ValueError: If any token in ``search_in`` is invalid.
         ValueError: If ``keyword_op`` is not ``"AND"`` or ``"OR"``.
         requests.HTTPError, requests.ConnectionError, requests.Timeout
     """
-    # Guard: keyword and keywords are mutually exclusive
-    if keyword is not None and keywords is not None:
+    # Guard: at most one keyword mode active
+    active_modes = sum([
+        keyword is not None,
+        bool(keywords),
+        bool_query is not None,
+    ])
+    if active_modes > 1:
         raise ValueError(
-            "'keyword' and 'keywords' are mutually exclusive. "
-            "Use 'keywords' (list) for boolean search, or 'keyword' (str) for simple search."
+            "'keyword', 'keywords', and 'bool_query' are mutually exclusive."
         )
 
-    # Validate search_in tokens up-front
     _validate_search_in(search_in)
 
     since_date = (date.today() - timedelta(days=since_days)).isoformat()
 
-    # Build keyword qualifier
-    if keywords is not None:
-        # New multi-keyword path
+    # ── Build keyword qualifier ───────────────────────────────────────────────
+    if bool_query is not None:
+        # AST path — search_in honoured, keyword_op/keyword_not ignored
+        keyword_qualifier = " " + build_keyword_qualifier(
+            bool_query, search_in=search_in
+        )
+        is_search_mode = True
+
+    elif keywords is not None:
+        # Multi-keyword list path
         keyword_qualifier = (
             " " + build_keyword_qualifier(
                 keywords,
@@ -962,19 +890,16 @@ def search_trending_repos(
             else ""
         )
         is_search_mode = bool(keywords)
+
     else:
-        # Legacy single-keyword path (backward compat)
+        # Legacy single-keyword path
         keyword_qualifier = f' "{keyword}" in:{search_in}' if keyword else ""
         is_search_mode = bool(keyword)
 
     if is_search_mode:
         queries = {
-            "New & Relevant": (
-                f"created:>={since_date} stars:>50{keyword_qualifier}"
-            ),
-            "Active & Relevant": (
-                f"pushed:>={since_date} stars:>500{keyword_qualifier}"
-            ),
+            "New & Relevant": f"created:>={since_date} stars:>50{keyword_qualifier}",
+            "Active & Relevant": f"pushed:>={since_date} stars:>500{keyword_qualifier}",
         }
     else:
         queries = {
@@ -1015,31 +940,19 @@ def search_trending_developers(
     """
     Query the GitHub Search API and return top active developers.
 
-    Since GitHub has no official trending-developers endpoint, two
-    complementary user-search strategies are used:
+    Two complementary strategies:
+    - Rising Stars    — accounts created recently with public repos.
+    - Active Veterans — established developers with high follower counts.
 
-    - Rising Stars    — accounts created recently with public repos
-                        (``created:>=<date> repos:>0 followers:>0``).
-    - Active Veterans — established developers recently active in repos
-                        with high follower counts (``followers:>100``).
-
-    Duplicate logins are removed — each developer is shown once.
-    For each returned login, one extra GET request is made to
-    ``/users/{login}`` to enrich the result with name, company, location,
-    public_repos, followers, and following counts.
+    Each developer is enriched with one extra ``/users/{login}`` request.
 
     Args:
-        language:   Optional language filter applied as
-                    ``language:{language}`` to narrow results to devs
-                    active in that ecosystem.
-        since_days: Days to look back for the "Rising Stars" query
-                    (default: 1 = today).
+        language:   Language filter.
+        since_days: Days to look back for rising stars (default: 1).
         top_n:      Max developers to return (default: 10).
 
     Returns:
-        list of enriched user dicts, each containing at minimum:
-        ``login``, ``name``, ``company``, ``location``,
-        ``public_repos``, ``followers``, ``following``, ``html_url``.
+        list of enriched user dicts.
 
     Raises:
         requests.HTTPError, requests.ConnectionError, requests.Timeout
@@ -1061,12 +974,7 @@ def search_trending_developers(
         resp = requests.get(
             "https://api.github.com/search/users",
             headers=get_headers(),
-            params={
-                "q": query,
-                "sort": "followers",
-                "order": "desc",
-                "per_page": top_n,
-            },
+            params={"q": query, "sort": "followers", "order": "desc", "per_page": top_n},
             timeout=15,
         )
         resp.raise_for_status()
@@ -1077,7 +985,6 @@ def search_trending_developers(
             if len(raw_users) >= top_n:
                 break
 
-    # Enrich each user with full profile details
     enriched: list[dict] = []
     for user in raw_users[:top_n]:
         try:
@@ -1101,14 +1008,10 @@ def build_export_row(repo: dict, rank: int, category: str, snapshots: dict) -> d
     """
     Build a flat export record from a repo dict.
 
-    Extracts and renames the fields defined in EXPORT_FIELDS.
-    ``star_delta`` and ``daily_velocity`` are ``null`` / empty string on
-    the first run (no previous snapshot exists).
-
     Args:
         repo:      repo dict from GitHub API.
         rank:      1-based rank within its category.
-        category:  category label (e.g. "New Today").
+        category:  category label.
         snapshots: loaded snapshot data.
 
     Returns:
@@ -1139,10 +1042,8 @@ def build_dev_export_row(user: dict, rank: int) -> dict:
     """
     Build a flat export record from an enriched user dict.
 
-    Fields are defined in DEV_EXPORT_FIELDS.
-
     Args:
-        user: enriched user dict from search_trending_developers().
+        user: enriched user dict.
         rank: 1-based display rank.
 
     Returns:
@@ -1162,45 +1063,19 @@ def build_dev_export_row(user: dict, rank: int) -> dict:
 
 
 def export_json(rows: list[dict]) -> str:
-    """
-    Serialise export rows to a JSON string.
-
-    Args:
-        rows: list of dicts as returned by build_export_row() or
-              build_dev_export_row().
-
-    Returns:
-        Pretty-printed JSON string (2-space indent, ensure_ascii=False).
-    """
+    """Serialise export rows to a pretty-printed JSON string."""
     return json.dumps(rows, indent=2, ensure_ascii=False)
 
 
 def export_csv(rows: list[dict], fieldnames: list[str]) -> str:
     """
-    Serialise export rows to a CSV string.
+    Serialise export rows to a CSV string (utf-8-sig for Excel compat).
 
-    Uses the standard ``csv`` module with ``utf-8-sig`` BOM encoding so
-    the file opens correctly in Excel and LibreOffice without manual
-    encoding selection.
-
-    ``None`` values (star_delta / daily_velocity on first run) are written
-    as empty strings.
-
-    Args:
-        rows:       list of dicts as returned by build_export_row() or
-                    build_dev_export_row().
-        fieldnames: ordered list of column names (EXPORT_FIELDS or
-                    DEV_EXPORT_FIELDS).
-
-    Returns:
-        CSV string with header row and one data row per entry.
+    ``None`` values are written as empty strings.
     """
     buf = io.StringIO()
     writer = csv.DictWriter(
-        buf,
-        fieldnames=fieldnames,
-        lineterminator="\n",
-        extrasaction="ignore",
+        buf, fieldnames=fieldnames, lineterminator="\n", extrasaction="ignore"
     )
     writer.writeheader()
     for row in rows:
@@ -1213,10 +1088,9 @@ def write_output(content: str, output_file: str | None, fmt: str) -> None:
     Write export content to a file or stdout.
 
     Args:
-        content:     String content to write (JSON or CSV).
-        output_file: File path string, or None to write to stdout.
-        fmt:         Format label used only in the confirmation message
-                     when writing to a file ("json" or "csv").
+        content:     String content to write.
+        output_file: File path, or None to write to stdout.
+        fmt:         Format label for the confirmation message.
     """
     if output_file:
         encoding = "utf-8-sig" if fmt == "csv" else "utf-8"
@@ -1233,25 +1107,11 @@ def format_velocity(delta: int | None, velocity: float | None = None) -> str:
     """
     Render star delta and daily velocity as a human-readable badge.
 
-    Shows both the raw delta (total stars gained since last snapshot) and
-    the time-normalised rate (stars per day), so the number stays
-    meaningful even when the tool hasn't been run for days or weeks.
-
-    Args:
-        delta:    Raw star delta from ``star_delta()``.
-        velocity: Stars-per-day from ``daily_velocity()``. Optional;
-                  when omitted or None, only the delta is shown.
-
-    Returns:
-        Single-line string starting with two spaces.
-
     Examples:
         >>> format_velocity(None, None)
         '  Δ  — (first run — no velocity data yet)'
         >>> format_velocity(700, 100.0)
         '  Δ +700 ⭐ total  |  ~100.0 ⭐/day'
-        >>> format_velocity(0, 0.0)
-        '  Δ 0 ⭐ total  |  ~0.0 ⭐/day'
         >>> format_velocity(142)
         '  Δ +142 ⭐'
     """
@@ -1264,17 +1124,7 @@ def format_velocity(delta: int | None, velocity: float | None = None) -> str:
 
 
 def format_repo(repo: dict, rank: int, snapshots: dict) -> str:
-    """
-    Format a single repo dict into a human-readable terminal block.
-
-    Args:
-        repo:      repo dict from GitHub API.
-        rank:      1-based display rank within its category.
-        snapshots: loaded snapshot data for velocity calculation.
-
-    Returns:
-        Multi-line string ending with a trailing newline.
-    """
+    """Format a single repo dict into a human-readable terminal block."""
     delta = star_delta(repo, snapshots)
     velocity = daily_velocity(repo, snapshots)
     return (
@@ -1291,16 +1141,7 @@ def format_repo(repo: dict, rank: int, snapshots: dict) -> str:
 
 
 def format_developer(user: dict, rank: int) -> str:
-    """
-    Format a single enriched user dict into a human-readable terminal block.
-
-    Args:
-        user: enriched user dict from search_trending_developers().
-        rank: 1-based display rank.
-
-    Returns:
-        Multi-line string ending with a trailing newline.
-    """
+    """Format a single enriched user dict into a human-readable terminal block."""
     name = user.get("name") or user.get("login", "")
     company = (user.get("company") or "").strip().lstrip("@")
     location = user.get("location") or "N/A"
@@ -1330,6 +1171,7 @@ def find_repo_of_the_day(
     keyword_op: str = "AND",
     keyword_not: list[str] | None = None,
     search_in: str = "name,description",
+    bool_query: Union[Term, BoolNode, None] = None,
     use_snapshots: bool = True,
     output_fmt: Literal["text", "json", "csv"] = "text",
     output_file: str | None = None,
@@ -1337,6 +1179,15 @@ def find_repo_of_the_day(
 ) -> None:
     """
     Fetch, display/export, and optionally snapshot the top repos of the day.
+
+    Three keyword input modes (mutually exclusive):
+
+    1. ``keyword`` (str)  — single-term legacy path.
+    2. ``keywords`` (list[str])  — multi-term boolean path.
+       ``wildcard=True`` expands ``?``/``*`` patterns before querying.
+    3. ``bool_query`` (Term | BoolNode)  — pre-parsed AST passed directly
+       to ``search_trending_repos()``; ``search_in`` is honoured.
+       Future: wildcard expansion across AST leaf terms.
 
     Orchestration order:
       1. Print session header (text mode only).
@@ -1347,27 +1198,24 @@ def find_repo_of_the_day(
       6. Save new snapshot baseline (if use_snapshots).
 
     Args:
-        language:    Language filter. Default: None (all languages).
-        since_days:  Days to look back. Default: 1.
-        top_n:       Repos per category. Default: 10.
-        keyword:     Single keyword (legacy). Default: None.
-        keywords:    List of keywords for boolean search. Default: None.
-        keyword_op:  Boolean connector for keywords: AND (default) or OR.
-        keyword_not: Exclusion terms. Default: None.
-        search_in:   Search scope for keyword(s). Default: "name,description".
-        use_snapshots: Load/save velocity snapshots. Default: True.
-        output_fmt:  Output format: "text" (default), "json", or "csv".
-        output_file: Write output to this file path instead of stdout.
-        wildcard:    Expand ? and * patterns in keywords via NLTK corpus.
-                     Default: False.
-
-    Returns:
-        None
+        language:      Language filter.
+        since_days:    Days to look back.
+        top_n:         Repos per category.
+        keyword:       Single keyword (legacy).
+        keywords:      List of keywords for boolean search.
+        keyword_op:    Connector for keywords: AND (default) or OR.
+        keyword_not:   Exclusion terms.
+        search_in:     Search scope. Default: ``"name,description"``.
+        bool_query:    Pre-parsed AST from ``parse_boolean_query()``.
+        use_snapshots: Load/save velocity snapshots.
+        output_fmt:    Output format: "text", "json", or "csv".
+        output_file:   Write output to this path instead of stdout.
+        wildcard:      Expand ? and * patterns in keywords via NLTK.
 
     Raises:
         SystemExit(1): On GitHub API errors.
     """
-    # Apply wildcard expansion before anything else
+    # Wildcard expansion (keywords path only for now)
     if wildcard and keywords:
         keywords = apply_wildcards_to_keywords(keywords)
 
@@ -1376,7 +1224,9 @@ def find_repo_of_the_day(
         print(f"  daily-github-pulse v{VERSION}  —  {date.today().isoformat()}")
         if language:
             print(f"  Language : {language}")
-        if keywords:
+        if bool_query is not None:
+            print(f"  Query    : {_serialise_node(bool_query)}  in [{search_in}]")
+        elif keywords:
             op_label = keyword_op.upper()
             kw_display = f" {op_label} ".join(keywords)
             print(f"  Keywords : {kw_display}  in [{search_in}]")
@@ -1404,6 +1254,7 @@ def find_repo_of_the_day(
             keyword_op=keyword_op,
             keyword_not=keyword_not,
             search_in=search_in,
+            bool_query=bool_query,
         )
     except requests.HTTPError as exc:
         print(f"[ERROR] GitHub API returned: {exc}", file=sys.stderr)
@@ -1461,20 +1312,12 @@ def find_developer_of_the_day(
     """
     Fetch and display/export the top trending developers of the day.
 
-    Orchestration order:
-      1. Print session header (text mode only).
-      2. Fetch developers via search_trending_developers().
-      3. Render output in the requested format.
-
     Args:
-        language:   Language filter. Default: None (all languages).
-        since_days: Days to look back for rising stars. Default: 1.
-        top_n:      Developers to show. Default: 10.
-        output_fmt: Output format: "text" (default), "json", or "csv".
-        output_file: Write output to this file path instead of stdout.
-
-    Returns:
-        None
+        language:    Language filter.
+        since_days:  Days to look back for rising stars.
+        top_n:       Developers to show.
+        output_fmt:  Output format: "text", "json", or "csv".
+        output_file: Write output to this path instead of stdout.
 
     Raises:
         SystemExit(1): On GitHub API errors.
@@ -1542,67 +1385,40 @@ Examples:
   # Default: today's top repos, all languages
   python github_repo_of_the_day.py
 
-  # Trending developers (all languages)
+  # Trending developers
   python github_repo_of_the_day.py --developers
 
-  # Trending Python developers
-  python github_repo_of_the_day.py --developers --language python
-
-  # Trending developers, JSON export
-  python github_repo_of_the_day.py --developers --output json
-
-  # Named period shortcut (day / week / month)
+  # Named period shortcut
   python github_repo_of_the_day.py --period week
-  python github_repo_of_the_day.py --period month --language rust
-
-  # Numeric fallback (--days still works)
-  python github_repo_of_the_day.py --days 14
 
   # Top Python repos
   python github_repo_of_the_day.py --language python
 
-  # Export as JSON to stdout
-  python github_repo_of_the_day.py --output json
-
-  # Export as CSV to a file
+  # Export as CSV
   python github_repo_of_the_day.py --output csv --output-file results.csv
 
-  # JSON export, pipe into jq
-  python github_repo_of_the_day.py --output json | jq '.[].full_name'
-
   # Single keyword search (legacy)
-  python github_repo_of_the_day.py --keyword "LLM agent" --output json
+  python github_repo_of_the_day.py --keyword "LLM agent"
 
   # Multi-keyword AND search
   python github_repo_of_the_day.py --keywords LLM agent --keyword-op AND
 
-  # Multi-keyword OR search
-  python github_repo_of_the_day.py --keywords LLM GPT Claude --keyword-op OR
-
   # Multi-keyword with exclusions
   python github_repo_of_the_day.py --keywords LLM agent --keyword-not benchmark survey
 
-  # Full Boolean query via parser
+  # Full Boolean query (dedicated AST path, search_in honoured)
   python github_repo_of_the_day.py --bool-query '(LLM OR GPT) AND agent AND NOT benchmark'
+  python github_repo_of_the_day.py --bool-query '(LLM OR GPT) AND agent' --search-in name,description,readme
 
-  # Wildcard expansion: analy?e → analyse OR analyze
+  # Wildcard expansion
   python github_repo_of_the_day.py --keywords "analy?e" --wildcard
-
-  # Wildcard expansion: optimiz* → optimize, optimized, optimizing, ...
   python github_repo_of_the_day.py --keywords "optimiz*" agent --wildcard
 
-  # Search in README too (slower)
+  # Search in README too
   python github_repo_of_the_day.py --keywords MCP server --search-in name,description,readme
 
-  # Skip velocity tracking
-  python github_repo_of_the_day.py --no-snapshot
-
-  # Reset stored snapshots
-  python github_repo_of_the_day.py --clear-snapshots
-
 Token setup:
-  Create a .env file:  GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxx
-  Add .env to .gitignore.
+  cp .env.example .env  # then set GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxx
   Get a token: https://github.com/settings/tokens
 
 Wildcard setup (one-time):
@@ -1611,101 +1427,50 @@ Wildcard setup (one-time):
         """,
     )
 
-    parser.add_argument(
-        "--developers", "--devs",
-        action="store_true",
-        help="Show trending developers instead of repositories.",
-    )
+    parser.add_argument("--developers", "--devs", action="store_true",
+                        help="Show trending developers instead of repositories.")
     parser.add_argument("--language", "-l", metavar="LANG",
                         help="Filter by language (e.g. python, go, rust)")
-    parser.add_argument(
-        "--period", "-p",
-        choices=["day", "week", "month"],
-        metavar="PERIOD",
-        help="Named look-back window: day (1), week (7), month (30). "
-             "Takes precedence over --days when both are supplied.",
-    )
+    parser.add_argument("--period", "-p", choices=["day", "week", "month"],
+                        metavar="PERIOD",
+                        help="Named look-back window: day (1), week (7), month (30).")
     parser.add_argument("--days", "-d", type=int, default=1, metavar="N",
-                        help="Look back N days (default: 1 = today). "
-                             "Ignored when --period is used.")
+                        help="Look back N days (default: 1). Ignored when --period is used.")
     parser.add_argument("--top", "-n", type=int, default=10, metavar="N",
-                        help="Results per category/mode (default: 10)")
+                        help="Results per category (default: 10)")
     parser.add_argument("--token", "-t", metavar="TOKEN",
                         help="GitHub PAT — overrides .env")
     parser.add_argument("--keyword", "-k", metavar="WORD",
-                        help="Single keyword to search (repos mode only). "
+                        help="Single keyword search (legacy). "
                              "Mutually exclusive with --keywords and --bool-query.")
-    parser.add_argument(
-        "--keywords",
-        nargs="+",
-        metavar="WORD",
-        help="One or more keywords for boolean search (repos mode only). "
-             "Use --keyword-op to set AND/OR connector. "
-             "Mutually exclusive with --keyword and --bool-query.",
-    )
-    parser.add_argument(
-        "--bool-query",
-        metavar="EXPR",
-        help="Full Boolean keyword expression parsed by parse_boolean_query(), "
-             "e.g. '(LLM OR GPT) AND agent AND NOT benchmark'. "
-             "Mutually exclusive with --keyword and --keywords.",
-    )
-    parser.add_argument(
-        "--keyword-op",
-        default="AND",
-        metavar="OP",
-        choices=["AND", "OR", "and", "or"],
-        help="Boolean connector for --keywords: AND (default) or OR.",
-    )
-    parser.add_argument(
-        "--keyword-not",
-        nargs="+",
-        metavar="WORD",
-        help="Terms to exclude from results (NOT clause). "
-             "Used together with --keywords.",
-    )
-    parser.add_argument(
-        "--search-in", "-s",
-        default="name,description",
-        metavar="SCOPE",
-        help=(
-            "Where to search the keyword: name, description, readme "
-            "(comma-separated, default: name,description). "
-            "Note: 'readme' is significantly slower."
-        ),
-    )
-    parser.add_argument(
-        "--wildcard",
-        action="store_true",
-        help=(
-            "Expand wildcard patterns in --keywords before querying GitHub. "
-            "? matches one character, * matches zero or more. "
-            "Requires: pip install nltk  (corpus auto-downloaded on first use). "
-            "Example: --keywords 'analy?e' → analyse OR analyze"
-        ),
-    )
-    parser.add_argument(
-        "--output", "-o",
-        choices=["text", "json", "csv"],
-        default="text",
-        metavar="FORMAT",
-        help="Output format: text (default), json, csv",
-    )
-    parser.add_argument(
-        "--output-file", "-f",
-        metavar="FILE",
-        help="Write output to FILE instead of stdout (json/csv only)",
-    )
-    parser.add_argument(
-        "--no-snapshot",
-        action="store_true",
-        help="Disable snapshot save/load for this run (repos mode only)",
-    )
-    parser.add_argument(
-        "--clear-snapshots",
-        action="store_true",
-        help=f"Delete all stored snapshots and exit ({SNAPSHOT_FILE})",
-    )
+    parser.add_argument("--keywords", nargs="+", metavar="WORD",
+                        help="Multi-keyword boolean search. "
+                             "Mutually exclusive with --keyword and --bool-query.")
+    parser.add_argument("--bool-query", metavar="EXPR",
+                        help="Full Boolean expression: '(LLM OR GPT) AND agent AND NOT benchmark'. "
+                             "Parsed into AST and sent through dedicated path. "
+                             "Mutually exclusive with --keyword and --keywords.")
+    parser.add_argument("--keyword-op", default="AND", metavar="OP",
+                        choices=["AND", "OR", "and", "or"],
+                        help="Connector for --keywords: AND (default) or OR.")
+    parser.add_argument("--keyword-not", nargs="+", metavar="WORD",
+                        help="Terms to exclude (NOT clause). Used with --keywords.")
+    parser.add_argument("--search-in", "-s", default="name,description", metavar="SCOPE",
+                        help="Search scope: name, description, readme "
+                             "(comma-separated, default: name,description). "
+                             "Honoured by all three keyword modes.")
+    parser.add_argument("--wildcard", action="store_true",
+                        help="Expand ? and * in --keywords via NLTK corpus. "
+                             "Requires: pip install nltk")
+    parser.add_argument("--output", "-o", choices=["text", "json", "csv"],
+                        default="text", metavar="FORMAT",
+                        help="Output format: text (default), json, csv")
+    parser.add_argument("--output-file", "-f", metavar="FILE",
+                        help="Write output to FILE instead of stdout")
+    parser.add_argument("--no-snapshot", action="store_true",
+                        help="Disable snapshot save/load for this run")
+    parser.add_argument("--clear-snapshots", action="store_true",
+                        help=f"Delete all stored snapshots and exit ({SNAPSHOT_FILE})")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
 
     args = parser.parse_args()
@@ -1732,8 +1497,8 @@ Wildcard setup (one-time):
 
     effective_days = resolve_period(args.period, args.days)
 
-    # Resolve --bool-query into a keyword qualifier understood by find_repo_of_the_day
-    bool_query_ast = None
+    # Parse --bool-query into AST here; pass AST down — no string conversion
+    bool_query_ast: Union[Term, BoolNode, None] = None
     if getattr(args, "bool_query", None):
         bool_query_ast = parse_boolean_query(args.bool_query)
 
@@ -1746,30 +1511,18 @@ Wildcard setup (one-time):
             output_file=args.output_file,
         )
     else:
-        if bool_query_ast is not None:
-            kq = build_keyword_qualifier(bool_query_ast, search_in=args.search_in)
-            find_repo_of_the_day(
-                language=args.language,
-                since_days=effective_days,
-                top_n=args.top,
-                keyword=kq,
-                search_in=args.search_in,
-                use_snapshots=not args.no_snapshot,
-                output_fmt=args.output,
-                output_file=args.output_file,
-            )
-        else:
-            find_repo_of_the_day(
-                language=args.language,
-                since_days=effective_days,
-                top_n=args.top,
-                keyword=args.keyword,
-                keywords=args.keywords,
-                keyword_op=args.keyword_op,
-                keyword_not=args.keyword_not,
-                search_in=args.search_in,
-                use_snapshots=not args.no_snapshot,
-                output_fmt=args.output,
-                output_file=args.output_file,
-                wildcard=args.wildcard,
-            )
+        find_repo_of_the_day(
+            language=args.language,
+            since_days=effective_days,
+            top_n=args.top,
+            keyword=args.keyword,
+            keywords=args.keywords,
+            keyword_op=args.keyword_op,
+            keyword_not=args.keyword_not,
+            search_in=args.search_in,
+            bool_query=bool_query_ast,
+            use_snapshots=not args.no_snapshot,
+            output_fmt=args.output,
+            output_file=args.output_file,
+            wildcard=args.wildcard,
+        )
