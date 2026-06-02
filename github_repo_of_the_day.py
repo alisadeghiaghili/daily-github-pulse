@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-daily-github-pulse  v2.1.0
+daily-github-pulse  v2.2.0
 ──────────────────────────
 Discover GitHub's top repositories AND developers of the day — with real star velocity.
 
@@ -48,6 +48,29 @@ Wildcard expansion
   *  matches zero or more characters  optimiz* → optimize OR optimized OR ...
 
   If NLTK is unavailable the term is passed through unchanged.
+
+AI Relevance Filter
+────────────────────
+  Pass --ai-filter with --ai-filter-query "your intent" to post-filter results
+  through an LLM.  The LLM reads the repo description + README snippet and
+  decides if the repo is relevant to your query.
+
+  Supported backends (set in .env):
+    OpenAI-compatible  — OpenAI, Ollama, LM Studio, vLLM, Groq, Together AI,
+                         OpenRouter, and any server that speaks the OpenAI API.
+    Anthropic          — native Claude API (set AI_PROVIDER=anthropic).
+
+  .env keys:
+    AI_PROVIDER=openai            # openai (default) | anthropic
+    AI_BASE_URL=https://...       # for openai-compatible backends
+    AI_MODEL=gpt-4o-mini          # model name
+    AI_API_KEY=sk-...             # API key (use "ollama" for local Ollama)
+    ANTHROPIC_API_KEY=sk-ant-...  # Anthropic only
+    ANTHROPIC_MODEL=claude-haiku-4-5  # Anthropic only
+
+  Fallback behaviour when LLM is unavailable:
+    --ai-filter-fallback=fail        (default) — exits with error
+    --ai-filter-fallback=passthrough — warns and shows all repos unfiltered
 """
 
 from __future__ import annotations
@@ -74,7 +97,7 @@ except ImportError:
 # ──────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 SNAPSHOT_DIR = Path.home() / ".daily-github-pulse"
 SNAPSHOT_FILE = SNAPSHOT_DIR / "snapshots.json"
 
@@ -1160,6 +1183,324 @@ def format_developer(user: dict, rank: int) -> str:
 
 
 # ──────────────────────────────────────────────
+# AI Relevance Filter
+# ──────────────────────────────────────────────
+
+@dataclass
+class AIFilterConfig:
+    """
+    Configuration for the LLM-based relevance filter.
+
+    Attributes:
+        provider:   ``"openai"`` (any OpenAI-compatible endpoint) or
+                    ``"anthropic"`` (native Anthropic SDK).
+        base_url:   Base URL for OpenAI-compatible endpoints.
+                    Ignored when provider is ``"anthropic"``.
+        model:      Model name (e.g. ``"gpt-4o-mini"``, ``"llama3.2"``,
+                    ``"claude-haiku-4-5"``).
+        api_key:    API key.  Use ``"ollama"`` or ``"lm-studio"`` for
+                    local servers that don't require a real key.
+        max_tokens: Max tokens in the LLM response (default: 64 — we only
+                    need yes/no + one sentence).
+        timeout:    HTTP timeout in seconds (default: 30).
+    """
+    provider: str = "openai"
+    base_url: str = "https://api.openai.com/v1"
+    model: str = "gpt-4o-mini"
+    api_key: str = ""
+    max_tokens: int = 64
+    timeout: int = 30
+
+
+def load_ai_filter_config() -> AIFilterConfig | None:
+    """
+    Build an AIFilterConfig from environment variables.
+
+    Reads the following .env keys:
+
+    OpenAI-compatible path (default)::
+
+        AI_PROVIDER=openai            # optional, defaults to openai
+        AI_BASE_URL=https://...       # base URL of the API
+        AI_MODEL=gpt-4o-mini          # model name
+        AI_API_KEY=sk-...             # API key
+
+    Anthropic path::
+
+        AI_PROVIDER=anthropic
+        ANTHROPIC_API_KEY=sk-ant-...
+        ANTHROPIC_MODEL=claude-haiku-4-5
+
+    Returns:
+        ``AIFilterConfig`` if the necessary env vars are present, else ``None``.
+    """
+    provider = os.getenv("AI_PROVIDER", "openai").strip().lower()
+
+    if provider == "anthropic":
+        api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+        model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5").strip()
+        if not api_key:
+            return None
+        return AIFilterConfig(
+            provider="anthropic",
+            base_url="",  # unused
+            model=model,
+            api_key=api_key,
+        )
+
+    # OpenAI-compatible (default)
+    api_key = os.getenv("AI_API_KEY", "").strip()
+    base_url = os.getenv("AI_BASE_URL", "https://api.openai.com/v1").strip().rstrip("/")
+    model = os.getenv("AI_MODEL", "gpt-4o-mini").strip()
+    if not api_key:
+        return None
+    return AIFilterConfig(
+        provider="openai",
+        base_url=base_url,
+        model=model,
+        api_key=api_key,
+    )
+
+
+def fetch_readme_snippet(full_name: str, max_chars: int = 800) -> str:
+    """
+    Fetch the first ``max_chars`` characters of a repo's README via GitHub API.
+
+    Uses the ``/repos/{owner}/{repo}/readme`` endpoint which returns the
+    preferred README regardless of filename or case.
+
+    Args:
+        full_name: Repository full name, e.g. ``"owner/repo"``.
+        max_chars: Maximum characters to return (default: 800).
+
+    Returns:
+        README snippet string, or ``""`` if unavailable / non-text.
+    """
+    try:
+        resp = requests.get(
+            f"https://api.github.com/repos/{full_name}/readme",
+            headers={**get_headers(), "Accept": "application/vnd.github.raw+json"},
+            timeout=10,
+        )
+        if resp.status_code == 404:
+            return ""
+        resp.raise_for_status()
+        return resp.text[:max_chars]
+    except requests.RequestException:
+        return ""
+
+
+def _call_openai_compatible(
+    config: AIFilterConfig,
+    system_prompt: str,
+    user_message: str,
+) -> str:
+    """
+    Call any OpenAI-compatible chat completions endpoint.
+
+    Args:
+        config:        AIFilterConfig with provider=``"openai"``.
+        system_prompt: System message for the LLM.
+        user_message:  User message containing repo context.
+
+    Returns:
+        Raw text content of the first choice's message.
+
+    Raises:
+        requests.HTTPError: On non-2xx responses.
+        requests.Timeout:   On timeout.
+        ValueError:         If the response is missing the expected fields.
+    """
+    resp = requests.post(
+        f"{config.base_url}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {config.api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": config.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            "max_tokens": config.max_tokens,
+            "temperature": 0,
+        },
+        timeout=config.timeout,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    try:
+        return data["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError) as exc:
+        raise ValueError(f"Unexpected LLM response shape: {data}") from exc
+
+
+def _call_anthropic(
+    config: AIFilterConfig,
+    system_prompt: str,
+    user_message: str,
+) -> str:
+    """
+    Call the Anthropic Messages API.
+
+    Requires the ``anthropic`` package: ``pip install anthropic``.
+
+    Args:
+        config:        AIFilterConfig with provider=``"anthropic"``.
+        system_prompt: System message.
+        user_message:  User message containing repo context.
+
+    Returns:
+        Raw text of the first content block.
+
+    Raises:
+        ImportError:  If the ``anthropic`` package is not installed.
+        anthropic.APIError: On API errors.
+    """
+    try:
+        import anthropic as _anthropic  # type: ignore
+    except ImportError as exc:
+        raise ImportError(
+            "The 'anthropic' package is required for AI_PROVIDER=anthropic. "
+            "Install it with: pip install anthropic"
+        ) from exc
+
+    client = _anthropic.Anthropic(api_key=config.api_key)
+    msg = client.messages.create(
+        model=config.model,
+        max_tokens=config.max_tokens,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_message}],
+    )
+    return msg.content[0].text.strip()
+
+
+_RELEVANCE_SYSTEM_PROMPT = (
+    "You are a precise relevance classifier for GitHub repositories. "
+    "Given a user's intent and a repository's description plus README snippet, "
+    "decide if the repository is relevant to the user's intent. "
+    "Reply with exactly one line: start with YES or NO, "
+    "then a colon and a brief reason (max 15 words). "
+    "Example: YES: implements the exact pattern the user described."
+)
+
+
+def is_repo_relevant(
+    repo: dict,
+    query: str,
+    config: AIFilterConfig,
+) -> tuple[bool, str]:
+    """
+    Ask the LLM whether a repository is relevant to ``query``.
+
+    Fetches the README snippet, builds a compact context message, and
+    calls the appropriate LLM backend.
+
+    Args:
+        repo:   Repository dict from GitHub API.
+        query:  Natural-language description of what the user is looking for.
+        config: AIFilterConfig specifying the backend and credentials.
+
+    Returns:
+        ``(relevant: bool, reason: str)``
+        ``relevant`` is ``True`` when the LLM responds with ``YES``.
+        ``reason`` is the LLM's brief explanation.
+    """
+    description = (repo.get("description") or "").strip()
+    readme = fetch_readme_snippet(repo["full_name"])
+
+    user_message = (
+        f"User intent: {query}\n\n"
+        f"Repository: {repo['full_name']}\n"
+        f"Description: {description or 'N/A'}\n"
+        f"README snippet:\n{readme or 'N/A'}"
+    )
+
+    try:
+        if config.provider == "anthropic":
+            raw = _call_anthropic(config, _RELEVANCE_SYSTEM_PROMPT, user_message)
+        else:
+            raw = _call_openai_compatible(config, _RELEVANCE_SYSTEM_PROMPT, user_message)
+    except Exception as exc:  # noqa: BLE001
+        # Propagate so callers can apply fallback policy
+        raise RuntimeError(f"LLM call failed for {repo['full_name']}: {exc}") from exc
+
+    upper = raw.upper()
+    relevant = upper.startswith("YES")
+    reason = raw.split(":", 1)[-1].strip() if ":" in raw else raw
+    return relevant, reason
+
+
+def apply_ai_filter(
+    repos_by_category: dict,
+    query: str,
+    config: AIFilterConfig,
+    fallback: str = "fail",
+    verbose: bool = True,
+) -> dict:
+    """
+    Filter ``repos_by_category`` to only relevant repos using LLM scoring.
+
+    Iterates over every repo in every category, calls ``is_repo_relevant()``,
+    and keeps only those for which the LLM returns ``YES``.
+
+    Args:
+        repos_by_category: Output of ``search_trending_repos()``.
+        query:             Natural-language relevance query.
+        config:            AIFilterConfig.
+        fallback:          ``"fail"`` (default) — raises RuntimeError on LLM
+                           failure. ``"passthrough"`` — warns and returns the
+                           original dict unfiltered.
+        verbose:           Print per-repo progress to stderr (default: True).
+
+    Returns:
+        New dict with the same category keys but only relevant repos retained.
+        Empty-list categories are preserved (not dropped).
+
+    Raises:
+        RuntimeError: If any LLM call fails and ``fallback="fail"``.
+        SystemExit(1): If ``fallback="fail"`` and LLM is unreachable.
+    """
+    filtered: dict = {}
+    total = sum(len(v) for v in repos_by_category.values())
+    checked = 0
+
+    for category, repos in repos_by_category.items():
+        kept: list[dict] = []
+        for repo in repos:
+            checked += 1
+            if verbose:
+                print(
+                    f"  [AI filter {checked}/{total}] {repo['full_name']} ...",
+                    end="",
+                    flush=True,
+                    file=sys.stderr,
+                )
+            try:
+                relevant, reason = is_repo_relevant(repo, query, config)
+            except RuntimeError as exc:
+                if fallback == "passthrough":
+                    print(
+                        f"\n  [WARNING] AI filter unavailable: {exc}"
+                        "\n  Falling back to unfiltered results.",
+                        file=sys.stderr,
+                    )
+                    return repos_by_category  # return original unfiltered
+                print("", file=sys.stderr)  # newline after partial progress line
+                raise SystemExit(f"[ERROR] {exc}") from exc
+
+            verdict = "✓" if relevant else "✗"
+            if verbose:
+                print(f" {verdict}  {reason}", file=sys.stderr)
+            if relevant:
+                kept.append(repo)
+        filtered[category] = kept
+
+    return filtered
+
+
+# ──────────────────────────────────────────────
 # Entry point — repositories
 # ──────────────────────────────────────────────
 def find_repo_of_the_day(
@@ -1176,6 +1517,8 @@ def find_repo_of_the_day(
     output_fmt: Literal["text", "json", "csv"] = "text",
     output_file: str | None = None,
     wildcard: bool = False,
+    ai_filter_query: str | None = None,
+    ai_filter_fallback: str = "fail",
 ) -> None:
     """
     Fetch, display/export, and optionally snapshot the top repos of the day.
@@ -1194,26 +1537,31 @@ def find_repo_of_the_day(
       2. Apply wildcard expansion to keywords (if wildcard=True).
       3. Load previous snapshot (if use_snapshots).
       4. Fetch repos via search_trending_repos().
-      5. Render output in the requested format.
-      6. Save new snapshot baseline (if use_snapshots).
+      5. Apply AI relevance filter (if ai_filter_query is set).
+      6. Render output in the requested format.
+      7. Save new snapshot baseline (if use_snapshots).
 
     Args:
-        language:      Language filter.
-        since_days:    Days to look back.
-        top_n:         Repos per category.
-        keyword:       Single keyword (legacy).
-        keywords:      List of keywords for boolean search.
-        keyword_op:    Connector for keywords: AND (default) or OR.
-        keyword_not:   Exclusion terms.
-        search_in:     Search scope. Default: ``"name,description"``.
-        bool_query:    Pre-parsed AST from ``parse_boolean_query()``.
-        use_snapshots: Load/save velocity snapshots.
-        output_fmt:    Output format: "text", "json", or "csv".
-        output_file:   Write output to this path instead of stdout.
-        wildcard:      Expand ? and * patterns in keywords via NLTK.
+        language:           Language filter.
+        since_days:         Days to look back.
+        top_n:              Repos per category.
+        keyword:            Single keyword (legacy).
+        keywords:           List of keywords for boolean search.
+        keyword_op:         Connector for keywords: AND (default) or OR.
+        keyword_not:        Exclusion terms.
+        search_in:          Search scope. Default: ``"name,description"``.
+        bool_query:         Pre-parsed AST from ``parse_boolean_query()``.
+        use_snapshots:      Load/save velocity snapshots.
+        output_fmt:         Output format: "text", "json", or "csv".
+        output_file:        Write output to this path instead of stdout.
+        wildcard:           Expand ? and * patterns in keywords via NLTK.
+        ai_filter_query:    Natural-language intent for LLM relevance filter.
+                            Reads LLM config from env (see AIFilterConfig).
+                            If None, AI filter is skipped.
+        ai_filter_fallback: ``"fail"`` (default) or ``"passthrough"``.
 
     Raises:
-        SystemExit(1): On GitHub API errors.
+        SystemExit(1): On GitHub API errors or LLM errors (when fallback=fail).
     """
     # Wildcard expansion (keywords path only for now)
     if wildcard and keywords:
@@ -1234,6 +1582,8 @@ def find_repo_of_the_day(
                 print(f"  Exclude  : {', '.join(keyword_not)}")
         elif keyword:
             print(f"  Keyword  : '{keyword}'  in [{search_in}]")
+        if ai_filter_query:
+            print(f"  AI filter: {ai_filter_query}")
         auth = "Authenticated" if GITHUB_TOKEN else "Unauthenticated (60 req/hr limit)"
         print(f"  Auth     : {auth}")
         snap_status = "enabled" if use_snapshots else "disabled (--no-snapshot)"
@@ -1270,6 +1620,35 @@ def find_repo_of_the_day(
         print("[ERROR] GitHub API request timed out. Try again in a moment.",
               file=sys.stderr)
         sys.exit(1)
+
+    # ── AI relevance filter (optional) ───────────────────────────────────────
+    if ai_filter_query:
+        ai_cfg = load_ai_filter_config()
+        if ai_cfg is None:
+            msg = (
+                "[ERROR] --ai-filter requires LLM credentials in .env.\n"
+                "  Set AI_API_KEY (and optionally AI_BASE_URL, AI_MODEL)\n"
+                "  or AI_PROVIDER=anthropic + ANTHROPIC_API_KEY."
+            )
+            if ai_filter_fallback == "passthrough":
+                print(f"[WARNING] {msg}\n  Skipping AI filter.", file=sys.stderr)
+            else:
+                print(msg, file=sys.stderr)
+                sys.exit(1)
+        else:
+            if output_fmt == "text":
+                print(f"  Running AI relevance filter via {ai_cfg.provider}/{ai_cfg.model}…",
+                      file=sys.stderr)
+            all_results = apply_ai_filter(
+                all_results,
+                query=ai_filter_query,
+                config=ai_cfg,
+                fallback=ai_filter_fallback,
+                verbose=(output_fmt == "text"),
+            )
+            if output_fmt == "text":
+                kept = sum(len(v) for v in all_results.values())
+                print(f"  AI filter: {kept} repo(s) passed.\n", file=sys.stderr)
 
     if output_fmt == "text":
         for category, repos in all_results.items():
@@ -1417,6 +1796,16 @@ Examples:
   # Search in README too
   python github_repo_of_the_day.py --keywords MCP server --search-in name,description,readme
 
+  # AI relevance filter (OpenAI-compatible)
+  python github_repo_of_the_day.py --keywords LLM --ai-filter "production-ready LLM inference servers"
+
+  # AI filter with Ollama (local)
+  # .env: AI_BASE_URL=http://localhost:11434/v1  AI_MODEL=llama3.2  AI_API_KEY=ollama
+  python github_repo_of_the_day.py --keywords agent --ai-filter "autonomous coding agents"
+
+  # AI filter with graceful fallback
+  python github_repo_of_the_day.py --keywords LLM --ai-filter "RAG pipelines" --ai-filter-fallback passthrough
+
 Token setup:
   cp .env.example .env  # then set GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxx
   Get a token: https://github.com/settings/tokens
@@ -1424,6 +1813,14 @@ Token setup:
 Wildcard setup (one-time):
   pip install nltk
   # corpus downloads automatically on first --wildcard run
+
+AI filter setup:
+  # OpenAI
+  AI_API_KEY=sk-...  AI_MODEL=gpt-4o-mini
+  # Ollama (local)
+  AI_BASE_URL=http://localhost:11434/v1  AI_MODEL=llama3.2  AI_API_KEY=ollama
+  # Anthropic
+  AI_PROVIDER=anthropic  ANTHROPIC_API_KEY=sk-ant-...  ANTHROPIC_MODEL=claude-haiku-4-5
         """,
     )
 
@@ -1471,6 +1868,15 @@ Wildcard setup (one-time):
                         help="Disable snapshot save/load for this run")
     parser.add_argument("--clear-snapshots", action="store_true",
                         help=f"Delete all stored snapshots and exit ({SNAPSHOT_FILE})")
+    parser.add_argument("--ai-filter", metavar="QUERY",
+                        help="Natural-language intent for LLM relevance filter. "
+                             "Requires AI credentials in .env. "
+                             "Example: 'production-ready LLM inference servers'")
+    parser.add_argument("--ai-filter-fallback", default="fail",
+                        choices=["fail", "passthrough"], metavar="POLICY",
+                        help="Behaviour when LLM is unavailable: "
+                             "fail (default, exits with error) or "
+                             "passthrough (warns and shows unfiltered results).")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
 
     args = parser.parse_args()
@@ -1522,7 +1928,4 @@ Wildcard setup (one-time):
             search_in=args.search_in,
             bool_query=bool_query_ast,
             use_snapshots=not args.no_snapshot,
-            output_fmt=args.output,
-            output_file=args.output_file,
-            wildcard=args.wildcard,
-        )
+            output_fmt=args.outp
