@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-daily-github-pulse  v1.5.0
+daily-github-pulse  v1.6.0
 ──────────────────────────
-Discover GitHub's top repositories of the day — with real star velocity.
+Discover GitHub's top repositories AND developers of the day — with real star velocity.
 
 How velocity works
 ──────────────────
@@ -53,7 +53,7 @@ except ImportError:
 # ──────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 SNAPSHOT_DIR = Path.home() / ".daily-github-pulse"
 SNAPSHOT_FILE = SNAPSHOT_DIR / "snapshots.json"
 
@@ -79,6 +79,19 @@ EXPORT_FIELDS = [
     "description",
     "created_at",
     "updated_at",
+    "url",
+]
+
+# Fields included in developer JSON / CSV exports (in order)
+DEV_EXPORT_FIELDS = [
+    "rank",
+    "login",
+    "name",
+    "company",
+    "location",
+    "public_repos",
+    "followers",
+    "following",
     "url",
 ]
 
@@ -231,15 +244,11 @@ def elapsed_days(snapshots: dict, full_name: str) -> float | None:
     if not saved_at_raw:
         return None
     try:
-        # datetime.fromisoformat handles both offset-aware and naive strings.
-        # Snapshots written by this tool are always UTC-aware after v1.5.0;
-        # older entries written by v1.x are naive UTC — treat them as UTC.
         saved_dt = datetime.fromisoformat(saved_at_raw)
         if saved_dt.tzinfo is None:
             saved_dt = saved_dt.replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
         delta_seconds = (now - saved_dt).total_seconds()
-        # Guard against clock skew or same-second saves
         return max(delta_seconds / 86400, 1 / 86400)
     except (ValueError, TypeError):
         return None
@@ -281,7 +290,7 @@ def daily_velocity(repo: dict, snapshots: dict) -> float | None:
 
 
 # ──────────────────────────────────────────────
-# Core search
+# Core search — repositories
 # ──────────────────────────────────────────────
 def search_trending_repos(
     language: str | None = None,
@@ -348,7 +357,98 @@ def search_trending_repos(
 
 
 # ──────────────────────────────────────────────
-# Export helpers
+# Core search — developers
+# ──────────────────────────────────────────────
+def search_trending_developers(
+    language: str | None = None,
+    since_days: int = 1,
+    top_n: int = 10,
+) -> list[dict]:
+    """
+    Query the GitHub Search API and return top active developers.
+
+    Since GitHub has no official trending-developers endpoint, two
+    complementary user-search strategies are used:
+
+    - Rising Stars    — accounts created recently with public repos
+                        (``created:>=<date> repos:>0 followers:>0``).
+    - Active Veterans — established developers recently active in repos
+                        with high follower counts (``followers:>100``).
+
+    Duplicate logins are removed — each developer is shown once.
+    For each returned login, one extra GET request is made to
+    ``/users/{login}`` to enrich the result with name, company, location,
+    public_repos, followers, and following counts.
+
+    Args:
+        language:   Optional language filter applied as
+                    ``language:{language}`` to narrow results to devs
+                    active in that ecosystem.
+        since_days: Days to look back for the "Rising Stars" query
+                    (default: 1 = today).
+        top_n:      Max developers to return (default: 10).
+
+    Returns:
+        list of enriched user dicts, each containing at minimum:
+        ``login``, ``name``, ``company``, ``location``,
+        ``public_repos``, ``followers``, ``following``, ``html_url``.
+
+    Raises:
+        requests.HTTPError, requests.ConnectionError, requests.Timeout
+    """
+    since_date = (date.today() - timedelta(days=since_days)).isoformat()
+    lang_qualifier = f" language:{language}" if language else ""
+
+    queries = [
+        f"created:>={since_date} repos:>0 followers:>0{lang_qualifier}",
+        f"followers:>100{lang_qualifier}",
+    ]
+
+    seen_logins: set = set()
+    raw_users: list = []
+
+    for query in queries:
+        if len(raw_users) >= top_n:
+            break
+        resp = requests.get(
+            "https://api.github.com/search/users",
+            headers=get_headers(),
+            params={
+                "q": query,
+                "sort": "followers",
+                "order": "desc",
+                "per_page": top_n,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        for user in resp.json().get("items", []):
+            if user["login"] not in seen_logins:
+                seen_logins.add(user["login"])
+                raw_users.append(user)
+            if len(raw_users) >= top_n:
+                break
+
+    # Enrich each user with full profile details
+    enriched: list[dict] = []
+    for user in raw_users[:top_n]:
+        try:
+            detail_resp = requests.get(
+                f"https://api.github.com/users/{user['login']}",
+                headers=get_headers(),
+                timeout=15,
+            )
+            detail_resp.raise_for_status()
+            enriched.append(detail_resp.json())
+        except requests.RequestException:
+            # Fall back to basic search result if detail fetch fails
+            enriched.append(user)
+
+    return enriched
+
+
+# ──────────────────────────────────────────────
+# Export helpers — repositories
 # ──────────────────────────────────────────────
 def build_export_row(repo: dict, rank: int, category: str, snapshots: dict) -> dict:
     """
@@ -374,8 +474,8 @@ def build_export_row(repo: dict, rank: int, category: str, snapshots: dict) -> d
         "category":       category,
         "full_name":      repo["full_name"],
         "stars":          repo["stargazers_count"],
-        "star_delta":     delta,      # None → null in JSON, "" in CSV
-        "daily_velocity": velocity,   # None → null in JSON, "" in CSV
+        "star_delta":     delta,
+        "daily_velocity": velocity,
         "forks":          repo["forks_count"],
         "language":       repo.get("language") or "",
         "description":    (repo.get("description") or "").replace("\n", " "),
@@ -385,12 +485,42 @@ def build_export_row(repo: dict, rank: int, category: str, snapshots: dict) -> d
     }
 
 
+# ──────────────────────────────────────────────
+# Export helpers — developers
+# ──────────────────────────────────────────────
+def build_dev_export_row(user: dict, rank: int) -> dict:
+    """
+    Build a flat export record from an enriched user dict.
+
+    Fields are defined in DEV_EXPORT_FIELDS.
+
+    Args:
+        user: enriched user dict from search_trending_developers().
+        rank: 1-based display rank.
+
+    Returns:
+        Ordered dict suitable for JSON serialisation or csv.DictWriter.
+    """
+    return {
+        "rank":         rank,
+        "login":        user.get("login") or "",
+        "name":         user.get("name") or "",
+        "company":      (user.get("company") or "").strip().lstrip("@"),
+        "location":     user.get("location") or "",
+        "public_repos": user.get("public_repos") or 0,
+        "followers":    user.get("followers") or 0,
+        "following":    user.get("following") or 0,
+        "url":          user.get("html_url") or "",
+    }
+
+
 def export_json(rows: list[dict]) -> str:
     """
     Serialise export rows to a JSON string.
 
     Args:
-        rows: list of dicts as returned by build_export_row().
+        rows: list of dicts as returned by build_export_row() or
+              build_dev_export_row().
 
     Returns:
         Pretty-printed JSON string (2-space indent, ensure_ascii=False).
@@ -398,7 +528,7 @@ def export_json(rows: list[dict]) -> str:
     return json.dumps(rows, indent=2, ensure_ascii=False)
 
 
-def export_csv(rows: list[dict]) -> str:
+def export_csv(rows: list[dict], fieldnames: list[str]) -> str:
     """
     Serialise export rows to a CSV string.
 
@@ -410,15 +540,18 @@ def export_csv(rows: list[dict]) -> str:
     as empty strings.
 
     Args:
-        rows: list of dicts as returned by build_export_row().
+        rows:       list of dicts as returned by build_export_row() or
+                    build_dev_export_row().
+        fieldnames: ordered list of column names (EXPORT_FIELDS or
+                    DEV_EXPORT_FIELDS).
 
     Returns:
-        CSV string with header row and one data row per repo.
+        CSV string with header row and one data row per entry.
     """
     buf = io.StringIO()
     writer = csv.DictWriter(
         buf,
-        fieldnames=EXPORT_FIELDS,
+        fieldnames=fieldnames,
         lineterminator="\n",
         extrasaction="ignore",
     )
@@ -505,8 +638,36 @@ def format_repo(repo: dict, rank: int, snapshots: dict) -> str:
     )
 
 
+def format_developer(user: dict, rank: int) -> str:
+    """
+    Format a single enriched user dict into a human-readable terminal block.
+
+    Args:
+        user: enriched user dict from search_trending_developers().
+        rank: 1-based display rank.
+
+    Returns:
+        Multi-line string ending with a trailing newline.
+    """
+    name = user.get("name") or user.get("login", "")
+    company = (user.get("company") or "").strip().lstrip("@")
+    location = user.get("location") or "N/A"
+    bio = (user.get("bio") or "No bio")[:80]
+    return (
+        f"{'=' * 70}\n"
+        f"#{rank}  {user.get('login', '')}  ({name})\n"
+        f"    Followers: {user.get('followers', 0):,}  "
+        f"Repos: {user.get('public_repos', 0):,}  "
+        f"Following: {user.get('following', 0):,}\n"
+        f"    Company : {company or 'N/A'}\n"
+        f"    Location: {location}\n"
+        f"    {bio}\n"
+        f"    {user.get('html_url', '')}\n"
+    )
+
+
 # ──────────────────────────────────────────────
-# Entry point
+# Entry point — repositories
 # ──────────────────────────────────────────────
 def find_repo_of_the_day(
     language: str | None = None,
@@ -601,7 +762,7 @@ def find_repo_of_the_day(
         if output_fmt == "json":
             write_output(export_json(rows), output_file, "json")
         elif output_fmt == "csv":
-            write_output(export_csv(rows), output_file, "csv")
+            write_output(export_csv(rows, EXPORT_FIELDS), output_file, "csv")
 
     if use_snapshots:
         save_snapshots(all_results)
@@ -612,6 +773,85 @@ def find_repo_of_the_day(
 
 
 # ──────────────────────────────────────────────
+# Entry point — developers
+# ──────────────────────────────────────────────
+def find_developer_of_the_day(
+    language: str | None = None,
+    since_days: int = 1,
+    top_n: int = 10,
+    output_fmt: Literal["text", "json", "csv"] = "text",
+    output_file: str | None = None,
+) -> None:
+    """
+    Fetch and display/export the top trending developers of the day.
+
+    Orchestration order:
+      1. Print session header (text mode only).
+      2. Fetch developers via search_trending_developers().
+      3. Render output in the requested format.
+
+    Args:
+        language:   Language filter. Default: None (all languages).
+        since_days: Days to look back for rising stars. Default: 1.
+        top_n:      Developers to show. Default: 10.
+        output_fmt: Output format: "text" (default), "json", or "csv".
+        output_file: Write output to this file path instead of stdout.
+
+    Returns:
+        None
+
+    Raises:
+        SystemExit(1): On GitHub API errors.
+    """
+    if output_fmt == "text":
+        print(f"\n{'#' * 70}")
+        print(f"  daily-github-pulse v{VERSION}  —  {date.today().isoformat()}")
+        print(f"  Mode     : Trending Developers")
+        if language:
+            print(f"  Language : {language}")
+        auth = "Authenticated" if GITHUB_TOKEN else "Unauthenticated (60 req/hr limit)"
+        print(f"  Auth     : {auth}")
+        print(f"{'#' * 70}\n")
+
+    try:
+        developers = search_trending_developers(
+            language=language,
+            since_days=since_days,
+            top_n=top_n,
+        )
+    except requests.HTTPError as exc:
+        print(f"[ERROR] GitHub API returned: {exc}", file=sys.stderr)
+        if not GITHUB_TOKEN:
+            print("  Tip: set GITHUB_TOKEN in .env to raise rate limit to 5,000 req/hr.",
+                  file=sys.stderr)
+        sys.exit(1)
+    except requests.ConnectionError:
+        print("[ERROR] Could not reach GitHub API. Check your internet connection.",
+              file=sys.stderr)
+        sys.exit(1)
+    except requests.Timeout:
+        print("[ERROR] GitHub API request timed out. Try again in a moment.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    if output_fmt == "text":
+        print(f"\n{'─' * 70}")
+        print(f"  Trending Developers")
+        print(f"{'─' * 70}")
+        if not developers:
+            print("  No developers found.\n")
+        else:
+            for i, user in enumerate(developers, 1):
+                print(format_developer(user, i))
+    else:
+        rows = [build_dev_export_row(u, i) for i, u in enumerate(developers, 1)]
+        if output_fmt == "json":
+            write_output(export_json(rows), output_file, "json")
+        elif output_fmt == "csv":
+            write_output(export_csv(rows, DEV_EXPORT_FIELDS), output_file, "csv")
+
+
+# ──────────────────────────────────────────────
 # CLI
 # ──────────────────────────────────────────────
 if __name__ == "__main__":
@@ -619,12 +859,21 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
         prog="daily-github-pulse",
-        description="Find GitHub top repos of the day — with real star velocity.",
+        description="Find GitHub top repos and developers of the day.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Default: today's top repos, all languages
   python github_repo_of_the_day.py
+
+  # Trending developers (all languages)
+  python github_repo_of_the_day.py --developers
+
+  # Trending Python developers
+  python github_repo_of_the_day.py --developers --language python
+
+  # Trending developers, JSON export
+  python github_repo_of_the_day.py --developers --output json
 
   # Named period shortcut (day / week / month)
   python github_repo_of_the_day.py --period week
@@ -664,6 +913,11 @@ Token setup:
         """,
     )
 
+    parser.add_argument(
+        "--developers", "--devs",
+        action="store_true",
+        help="Show trending developers instead of repositories.",
+    )
     parser.add_argument("--language", "-l", metavar="LANG",
                         help="Filter by language (e.g. python, go, rust)")
     parser.add_argument(
@@ -677,11 +931,11 @@ Token setup:
                         help="Look back N days (default: 1 = today). "
                              "Ignored when --period is used.")
     parser.add_argument("--top", "-n", type=int, default=10, metavar="N",
-                        help="Repos per category (default: 10)")
+                        help="Results per category/mode (default: 10)")
     parser.add_argument("--token", "-t", metavar="TOKEN",
                         help="GitHub PAT — overrides .env")
     parser.add_argument("--keyword", "-k", metavar="WORD",
-                        help="Keyword to search (e.g. 'LLM agent', 'vector database')")
+                        help="Keyword to search (repos mode only)")
     parser.add_argument(
         "--search-in", "-s",
         default="name,description",
@@ -707,7 +961,7 @@ Token setup:
     parser.add_argument(
         "--no-snapshot",
         action="store_true",
-        help="Disable snapshot save/load for this run",
+        help="Disable snapshot save/load for this run (repos mode only)",
     )
     parser.add_argument(
         "--clear-snapshots",
@@ -731,13 +985,22 @@ Token setup:
 
     effective_days = resolve_period(args.period, args.days)
 
-    find_repo_of_the_day(
-        language=args.language,
-        since_days=effective_days,
-        top_n=args.top,
-        keyword=args.keyword,
-        search_in=args.search_in,
-        use_snapshots=not args.no_snapshot,
-        output_fmt=args.output,
-        output_file=args.output_file,
-    )
+    if args.developers:
+        find_developer_of_the_day(
+            language=args.language,
+            since_days=effective_days,
+            top_n=args.top,
+            output_fmt=args.output,
+            output_file=args.output_file,
+        )
+    else:
+        find_repo_of_the_day(
+            language=args.language,
+            since_days=effective_days,
+            top_n=args.top,
+            keyword=args.keyword,
+            search_in=args.search_in,
+            use_snapshots=not args.no_snapshot,
+            output_fmt=args.output,
+            output_file=args.output_file,
+        )
