@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-daily-github-pulse  v1.8.0
+daily-github-pulse  v1.9.0
 ──────────────────────────
 Discover GitHub's top repositories AND developers of the day — with real star velocity.
 
@@ -37,10 +37,12 @@ import csv
 import io
 import json
 import os
+import re
 import sys
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Union
 
 import requests
 
@@ -53,7 +55,7 @@ except ImportError:
 # ──────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────
-VERSION = "1.8.0"
+VERSION = "1.9.0"
 SNAPSHOT_DIR = Path.home() / ".daily-github-pulse"
 SNAPSHOT_FILE = SNAPSHOT_DIR / "snapshots.json"
 
@@ -100,6 +102,258 @@ DEV_EXPORT_FIELDS = [
     "following",
     "url",
 ]
+
+
+# ──────────────────────────────────────────────
+# Boolean query AST nodes
+# ──────────────────────────────────────────────
+
+@dataclass(frozen=True, eq=True)
+class Term:
+    """
+    A single search term, optionally negated.
+
+    Attributes:
+        value:   The raw term string (stripped of surrounding quotes).
+        negated: True when this term was preceded by NOT.
+
+    Examples:
+        >>> Term("LLM")
+        Term(value='LLM', negated=False)
+        >>> Term("benchmark", negated=True)
+        Term(value='benchmark', negated=True)
+    """
+    value: str
+    negated: bool = False
+
+
+@dataclass(frozen=True, eq=True)
+class BoolNode:
+    """
+    A binary/n-ary boolean expression node.
+
+    Attributes:
+        op:       The boolean operator: ``"AND"`` or ``"OR"``.
+        children: Two or more child nodes, each a ``Term`` or ``BoolNode``.
+
+    All children in a BoolNode share the same operator.  Mixing AND and OR
+    at the same level requires parentheses, which produce nested BoolNodes.
+
+    Examples:
+        >>> BoolNode("AND", [Term("LLM"), Term("agent")])
+        BoolNode(op='AND', children=[Term(value='LLM', negated=False), ...])
+    """
+    op: str
+    children: list = field(default_factory=list)
+
+
+# ──────────────────────────────────────────────
+# Boolean query parser
+# ──────────────────────────────────────────────
+
+def parse_boolean_query(expr: str) -> Union[Term, BoolNode]:
+    """
+    Parse a Boolean keyword expression into an AST.
+
+    Supported syntax::
+
+        term
+        NOT term
+        "quoted phrase"
+        NOT "quoted phrase"
+        A AND B
+        A OR B
+        A AND B AND C          (flat n-ary AND)
+        (A OR B) AND C         (nested groups)
+        (A AND NOT B) OR C     (NOT inside a group)
+
+    Operators (AND, OR, NOT) are case-insensitive.
+    Leading/trailing whitespace in the expression and around each term
+    is stripped.
+    Quoted phrases are treated as single terms.
+
+    Args:
+        expr: Boolean keyword string.
+
+    Returns:
+        A ``Term`` for a single (possibly negated) term, or a ``BoolNode``
+        for a compound expression.
+
+    Raises:
+        ValueError: If ``expr`` is empty or whitespace-only.
+        ValueError: If parentheses are unbalanced.
+        ValueError: If two terms appear consecutively without an operator.
+        ValueError: If an operator appears with no right-hand operand
+                    (dangling AND/OR/NOT).
+
+    Examples:
+        >>> parse_boolean_query("LLM")
+        Term(value='LLM', negated=False)
+        >>> parse_boolean_query("NOT benchmark")
+        Term(value='benchmark', negated=True)
+        >>> parse_boolean_query("LLM AND agent")
+        BoolNode(op='AND', children=[Term(value='LLM', ...), Term(value='agent', ...)])
+        >>> parse_boolean_query('(LLM OR GPT) AND agent AND NOT benchmark')
+        BoolNode(op='AND', children=[BoolNode(op='OR', ...), Term('agent'), Term('benchmark', negated=True)])
+    """
+    expr = expr.strip()
+    if not expr:
+        raise ValueError("parse_boolean_query: expression is empty.")
+
+    tokens = _tokenise(expr)
+    ast, pos = _parse_expr(tokens, 0)
+    if pos != len(tokens):
+        # Unconsumed tokens mean a stray closing paren or similar
+        raise ValueError(
+            f"parse_boolean_query: unexpected token '{tokens[pos]}' "
+            f"at position {pos}."
+        )
+    return ast
+
+
+# ── internal tokeniser ──────────────────────────────────────────────────────
+
+_TOKEN_RE = re.compile(
+    r'"[^"]*"'          # quoted phrase
+    r'|\('              # open paren
+    r'|\)'              # close paren
+    r'|[^\s()"]+',      # bare word / operator
+    re.IGNORECASE,
+)
+
+
+def _tokenise(expr: str) -> list[str]:
+    """Split expression into a flat token list."""
+    return _TOKEN_RE.findall(expr)
+
+
+# ── recursive-descent parser ────────────────────────────────────────────────
+
+def _parse_expr(
+    tokens: list[str], pos: int, inside_group: bool = False
+) -> tuple[Union[Term, BoolNode], int]:
+    """
+    Parse tokens[pos:] into an AST node.
+
+    Grammar (informal)::
+
+        expr    ::= operand (OP operand)*
+        operand ::= NOT? atom
+        atom    ::= TERM | '(' expr ')'
+        OP      ::= AND | OR
+
+    A group's top-level operator must be homogeneous (all AND or all OR).
+    Mixing operators at the same nesting level without parens raises
+    ValueError — the caller must use parentheses.
+
+    Returns:
+        (node, new_pos)
+    """
+    children: list[Union[Term, BoolNode]] = []
+    op: str | None = None
+    last_was_operand = False  # used to detect consecutive terms
+
+    while pos < len(tokens):
+        tok = tokens[pos]
+        upper = tok.upper()
+
+        # ── closing paren — end of group
+        if tok == ")":
+            if not inside_group:
+                raise ValueError(
+                    "parse_boolean_query: unbalanced parentheses — "
+                    f"unexpected ')' at position {pos}."
+                )
+            break
+
+        # ── binary operator (AND / OR)
+        if upper in ("AND", "OR"):
+            if not children:
+                raise ValueError(
+                    f"parse_boolean_query: operator '{tok}' at position {pos} "
+                    "has no left-hand operand."
+                )
+            if op is not None and op != upper:
+                raise ValueError(
+                    f"parse_boolean_query: mixed operators '{op}' and '{upper}' "
+                    "at the same level — use parentheses to disambiguate."
+                )
+            op = upper
+            last_was_operand = False
+            pos += 1
+            continue
+
+        # ── NOT prefix
+        negated = False
+        if upper == "NOT":
+            pos += 1
+            if pos >= len(tokens) or tokens[pos] in ("AND", "OR", "NOT", ")"):
+                raise ValueError(
+                    f"parse_boolean_query: 'NOT' at position {pos - 1} "
+                    "has no operand."
+                )
+            negated = True
+            tok = tokens[pos]
+
+        # ── two consecutive operands without operator
+        if last_was_operand:
+            raise ValueError(
+                f"parse_boolean_query: missing operator before '{tok}' "
+                f"at position {pos}. "
+                "Did you forget AND or OR?"
+            )
+
+        # ── grouped sub-expression
+        if tok == "(":
+            pos += 1  # consume '('
+            if pos >= len(tokens):
+                raise ValueError(
+                    "parse_boolean_query: unbalanced parentheses — "
+                    "'(' was never closed."
+                )
+            child, pos = _parse_expr(tokens, pos, inside_group=True)
+            if pos >= len(tokens) or tokens[pos] != ")":
+                raise ValueError(
+                    "parse_boolean_query: unbalanced parentheses — "
+                    "'(' was never closed."
+                )
+            pos += 1  # consume ')'
+            # Nesting a group under NOT is unusual but not forbidden;
+            # skip for now (NOT only applies to plain terms by contract).
+            children.append(child)
+
+        # ── plain term (bare word or quoted phrase)
+        else:
+            value = tok.strip('"')
+            children.append(Term(value=value, negated=negated))
+            pos += 1
+
+        last_was_operand = True
+
+    # ── validate after consuming all tokens in this scope
+    if not children:
+        raise ValueError(
+            "parse_boolean_query: expression is empty or contains only operators."
+        )
+
+    if op is not None and len(children) == 1:
+        # Dangling operator: we consumed an OP but got no RHS before scope end
+        raise ValueError(
+            f"parse_boolean_query: dangling operator '{op}' — "
+            "no right-hand operand."
+        )
+
+    if len(children) == 1:
+        return children[0], pos
+
+    if op is None:
+        # Two+ children appeared without any operator between them;
+        # this path is guarded by last_was_operand, but keep as safety net.
+        raise ValueError(
+            "parse_boolean_query: missing operator between terms."
+        )
+
+    return BoolNode(op=op, children=children), pos
 
 
 # ──────────────────────────────────────────────
@@ -156,8 +410,50 @@ def resolve_period(period: str | None, days: int) -> int:
 # ──────────────────────────────────────────────
 # Keyword qualifier builder
 # ──────────────────────────────────────────────
+
+def _validate_search_in(search_in: str) -> None:
+    """Raise ValueError if any token in search_in is invalid."""
+    tokens = {t.strip() for t in search_in.split(",") if t.strip()}
+    invalid = tokens - VALID_SEARCH_IN
+    if invalid:
+        raise ValueError(
+            f"Invalid search_in value(s): {sorted(invalid)}. "
+            f"Valid options: {sorted(VALID_SEARCH_IN)}"
+        )
+
+
+def _serialise_node(node: Union[Term, BoolNode]) -> str:
+    """
+    Serialise a Term or BoolNode to a GitHub Search query fragment.
+
+    Inner BoolNodes are wrapped in parentheses to preserve operator
+    precedence.  The ``in:`` scope qualifier is NOT appended here —
+    it is added exactly once by ``build_keyword_qualifier()`` at the
+    outermost level.
+
+    Args:
+        node: A ``Term`` or ``BoolNode`` from ``parse_boolean_query()``.
+
+    Returns:
+        Query fragment string, e.g. ``'("LLM" OR "GPT")'`` or
+        ``'NOT "benchmark"'``.
+    """
+    if isinstance(node, Term):
+        quoted = f'"{node.value}"'
+        return f'NOT {quoted}' if node.negated else quoted
+
+    # BoolNode — recurse, wrapping each BoolNode child in parens
+    parts = []
+    for child in node.children:
+        if isinstance(child, BoolNode):
+            parts.append(f"({_serialise_node(child)})")
+        else:
+            parts.append(_serialise_node(child))
+    return f" {node.op} ".join(parts)
+
+
 def build_keyword_qualifier(
-    keywords: list[str],
+    keywords: Union[list[str], Term, BoolNode],
     keyword_op: str = "AND",
     keyword_not: list[str] | None = None,
     search_in: str = "name,description",
@@ -165,22 +461,35 @@ def build_keyword_qualifier(
     """
     Build the keyword fragment of a GitHub Search query string.
 
-    Composes one or more search terms with a boolean operator, appends an
-    ``in:`` scope qualifier exactly once, and optionally appends ``NOT``
-    exclusion terms.
+    Accepts either a plain ``list[str]`` of terms (legacy path) or a
+    pre-parsed ``Term`` / ``BoolNode`` AST node from
+    ``parse_boolean_query()`` (AST path).
+
+    **List path** — composes one or more search terms with a boolean
+    operator, appends an ``in:`` scope qualifier exactly once, and
+    optionally appends ``NOT`` exclusion terms.
+
+    **AST path** — serialises the AST directly and appends ``in:`` once.
+    ``keyword_op`` and ``keyword_not`` are ignored when an AST node is
+    passed (exclusions should be modelled as ``Term(negated=True)`` nodes
+    inside the AST).
 
     Each term (positive or negative) is wrapped in double-quotes so that
     multi-word phrases are treated as exact phrases by GitHub Search and
     the ``in:`` scope applies to the whole phrase.
 
     Args:
-        keywords:    One or more search terms.  Empty list returns ``""``.
-        keyword_op:  Boolean connector between positive terms.
+        keywords:    ``list[str]`` of search terms, a ``Term``, or a
+                     ``BoolNode``.  Empty list returns ``""``.
+        keyword_op:  Boolean connector between positive terms when
+                     ``keywords`` is a list.
                      ``"AND"`` (default) or ``"OR"`` — case-insensitive,
                      leading/trailing whitespace stripped.
-        keyword_not: Terms to exclude from results.  Each becomes a
-                     ``NOT "term"`` clause appended after the positive
-                     block.  Default: no exclusions.
+                     Ignored for AST input.
+        keyword_not: Terms to exclude from results when ``keywords`` is a
+                     list.  Each becomes a ``NOT "term"`` clause appended
+                     after the positive block.  Default: no exclusions.
+                     Ignored for AST input.
         search_in:   Comma-separated scope for the ``in:`` qualifier.
                      Valid tokens: ``"name"``, ``"description"``,
                      ``"readme"``.
@@ -188,11 +497,13 @@ def build_keyword_qualifier(
 
     Returns:
         Keyword fragment string ready to be appended to a GitHub Search
-        query, e.g. ``'"LLM" AND "agent" in:name,description NOT "benchmark"'``.
-        Returns ``""`` when ``keywords`` is empty.
+        query, e.g.
+        ``'"LLM" AND "agent" in:name,description NOT "benchmark"'``.
+        Returns ``""`` when ``keywords`` is an empty list.
 
     Raises:
-        ValueError: If ``keyword_op`` is not ``"AND"`` or ``"OR"``.
+        ValueError: If ``keyword_op`` is not ``"AND"`` or ``"OR"``
+                    (list path only).
         ValueError: If any token in ``search_in`` is invalid.
 
     Examples:
@@ -202,18 +513,20 @@ def build_keyword_qualifier(
         '"LLM" AND "agent" in:name,description'
         >>> build_keyword_qualifier(["LLM", "GPT"], keyword_op="OR", keyword_not=["survey"])
         '"LLM" OR "GPT" in:name,description NOT "survey"'
+        >>> ast = parse_boolean_query('(LLM OR GPT) AND agent AND NOT benchmark')
+        >>> build_keyword_qualifier(ast, search_in="name,description")
+        '("LLM" OR "GPT") AND "agent" AND NOT "benchmark" in:name,description'
     """
+    _validate_search_in(search_in)
+
+    # ── AST path ────────────────────────────────────────────────────────────
+    if isinstance(keywords, (Term, BoolNode)):
+        body = _serialise_node(keywords)
+        return f"{body} in:{search_in}"
+
+    # ── list[str] path ───────────────────────────────────────────────────────
     if keyword_not is None:
         keyword_not = []
-
-    # Validate search_in
-    tokens = {t.strip() for t in search_in.split(",") if t.strip()}
-    invalid = tokens - VALID_SEARCH_IN
-    if invalid:
-        raise ValueError(
-            f"Invalid search_in value(s): {sorted(invalid)}. "
-            f"Valid options: {sorted(VALID_SEARCH_IN)}"
-        )
 
     # Normalise and validate keyword_op
     op = keyword_op.strip().upper()
@@ -465,13 +778,7 @@ def search_trending_repos(
         )
 
     # Validate search_in tokens up-front
-    tokens = {t.strip() for t in search_in.split(",") if t.strip()}
-    invalid = tokens - VALID_SEARCH_IN
-    if invalid:
-        raise ValueError(
-            f"Invalid search_in value(s): {sorted(invalid)}. "
-            f"Valid options: {sorted(VALID_SEARCH_IN)}"
-        )
+    _validate_search_in(search_in)
 
     since_date = (date.today() - timedelta(days=since_days)).isoformat()
 
@@ -1099,6 +1406,9 @@ Examples:
   # Multi-keyword with exclusions
   python github_repo_of_the_day.py --keywords LLM agent --keyword-not benchmark survey
 
+  # Full Boolean query via parser
+  python github_repo_of_the_day.py --bool-query '(LLM OR GPT) AND agent AND NOT benchmark'
+
   # Search in README too (slower)
   python github_repo_of_the_day.py --keywords MCP server --search-in name,description,readme
 
@@ -1138,14 +1448,21 @@ Token setup:
                         help="GitHub PAT — overrides .env")
     parser.add_argument("--keyword", "-k", metavar="WORD",
                         help="Single keyword to search (repos mode only). "
-                             "Mutually exclusive with --keywords.")
+                             "Mutually exclusive with --keywords and --bool-query.")
     parser.add_argument(
         "--keywords",
         nargs="+",
         metavar="WORD",
         help="One or more keywords for boolean search (repos mode only). "
              "Use --keyword-op to set AND/OR connector. "
-             "Mutually exclusive with --keyword.",
+             "Mutually exclusive with --keyword and --bool-query.",
+    )
+    parser.add_argument(
+        "--bool-query",
+        metavar="EXPR",
+        help="Full Boolean keyword expression parsed by parse_boolean_query(), "
+             "e.g. '(LLM OR GPT) AND agent AND NOT benchmark'. "
+             "Mutually exclusive with --keyword and --keywords.",
     )
     parser.add_argument(
         "--keyword-op",
@@ -1209,10 +1526,20 @@ Token setup:
         sys.exit(0)
 
     # Validate mutually exclusive keyword flags
-    if args.keyword and args.keywords:
-        parser.error("--keyword and --keywords are mutually exclusive.")
+    active_kw_flags = sum([
+        args.keyword is not None,
+        bool(getattr(args, "keywords", None)),
+        bool(getattr(args, "bool_query", None)),
+    ])
+    if active_kw_flags > 1:
+        parser.error("--keyword, --keywords, and --bool-query are mutually exclusive.")
 
     effective_days = resolve_period(args.period, args.days)
+
+    # Resolve --bool-query into a keyword qualifier understood by find_repo_of_the_day
+    bool_query_ast = None
+    if getattr(args, "bool_query", None):
+        bool_query_ast = parse_boolean_query(args.bool_query)
 
     if args.developers:
         find_developer_of_the_day(
@@ -1223,16 +1550,33 @@ Token setup:
             output_file=args.output_file,
         )
     else:
-        find_repo_of_the_day(
-            language=args.language,
-            since_days=effective_days,
-            top_n=args.top,
-            keyword=args.keyword,
-            keywords=args.keywords,
-            keyword_op=args.keyword_op,
-            keyword_not=args.keyword_not,
-            search_in=args.search_in,
-            use_snapshots=not args.no_snapshot,
-            output_fmt=args.output,
-            output_file=args.output_file,
-        )
+        if bool_query_ast is not None:
+            # Pass the AST directly; build_keyword_qualifier handles it inside
+            # search_trending_repos via the keyword_qualifier override path.
+            # We serialise here and pass as a pre-built legacy keyword string
+            # to avoid adding a new parameter to find_repo_of_the_day.
+            kq = build_keyword_qualifier(bool_query_ast, search_in=args.search_in)
+            find_repo_of_the_day(
+                language=args.language,
+                since_days=effective_days,
+                top_n=args.top,
+                keyword=kq,   # pre-serialised; search_trending_repos wraps it correctly
+                search_in=args.search_in,
+                use_snapshots=not args.no_snapshot,
+                output_fmt=args.output,
+                output_file=args.output_file,
+            )
+        else:
+            find_repo_of_the_day(
+                language=args.language,
+                since_days=effective_days,
+                top_n=args.top,
+                keyword=args.keyword,
+                keywords=args.keywords,
+                keyword_op=args.keyword_op,
+                keyword_not=args.keyword_not,
+                search_in=args.search_in,
+                use_snapshots=not args.no_snapshot,
+                output_fmt=args.output,
+                output_file=args.output_file,
+            )
