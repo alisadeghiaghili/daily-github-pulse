@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-daily-github-pulse  v1.9.0
+daily-github-pulse  v2.0.0
 ──────────────────────────
 Discover GitHub's top repositories AND developers of the day — with real star velocity.
 
@@ -29,6 +29,17 @@ Token priority
   1. --token CLI flag
   2. GITHUB_TOKEN environment variable / .env file
   3. Unauthenticated  →  60 req/hr limit
+
+Wildcard expansion
+──────────────────
+  Pass --wildcard to expand ? and * patterns in keywords before building
+  the GitHub query.  Expansion is done client-side against the NLTK words
+  corpus (auto-downloaded on first use).  Requires: pip install nltk
+
+  ?  matches exactly one character   analy?e  → analyse OR analyze
+  *  matches zero or more characters  optimiz* → optimize OR optimized OR ...
+
+  If NLTK is unavailable the term is passed through unchanged.
 """
 
 from __future__ import annotations
@@ -55,7 +66,7 @@ except ImportError:
 # ──────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────
-VERSION = "1.9.0"
+VERSION = "2.0.0"
 SNAPSHOT_DIR = Path.home() / ".daily-github-pulse"
 SNAPSHOT_FILE = SNAPSHOT_DIR / "snapshots.json"
 
@@ -318,8 +329,6 @@ def _parse_expr(
                     "'(' was never closed."
                 )
             pos += 1  # consume ')'
-            # Nesting a group under NOT is unusual but not forbidden;
-            # skip for now (NOT only applies to plain terms by contract).
             children.append(child)
 
         # ── plain term (bare word or quoted phrase)
@@ -354,6 +363,163 @@ def _parse_expr(
         )
 
     return BoolNode(op=op, children=children), pos
+
+
+# ──────────────────────────────────────────────
+# Wildcard expansion
+# ──────────────────────────────────────────────
+
+def _load_wordlist() -> set[str] | None:
+    """
+    Load the NLTK words corpus as a lower-cased set.
+
+    Downloads the corpus automatically on first use if NLTK is available.
+    Returns None when NLTK is not installed, so callers can fall back
+    gracefully.
+
+    Returns:
+        set of lower-cased English words, or None if NLTK is unavailable.
+    """
+    try:
+        import nltk  # type: ignore
+        from nltk.corpus import words as nltk_words  # type: ignore
+        try:
+            word_set = set(w.lower() for w in nltk_words.words())
+        except LookupError:
+            nltk.download("words", quiet=True)
+            word_set = set(w.lower() for w in nltk_words.words())
+        return word_set
+    except ImportError:
+        return None
+
+
+def expand_wildcards(
+    term: str,
+    wordlist: set[str] | None = None,
+    max_variants: int = 20,
+) -> list[str]:
+    """
+    Expand a wildcard term into matching English words.
+
+    Wildcard syntax::
+
+        ?   matches exactly one character   (single-char slot)
+        *   matches zero or more characters  (any-length slot)
+
+    The pattern is anchored to the full word (start and end), so
+    ``analy?e`` does NOT match ``analysed`` — only exact-length matches.
+
+    Expansion is done against the NLTK English words corpus.  If NLTK is
+    unavailable, the original term is returned as a single-element list
+    (no expansion, no crash).
+
+    Args:
+        term:         Keyword string that may contain ``?`` and/or ``*``.
+        wordlist:     Pre-loaded word set (``set[str]``, lower-cased).
+                      Pass ``None`` to trigger lazy loading (calls
+                      ``_load_wordlist()`` internally).  Reuse the same
+                      set across multiple calls for efficiency.
+        max_variants: Upper bound on the number of variants returned.
+                      Prevents query-string explosion for broad patterns
+                      like ``a*``.  Default: 20.
+
+    Returns:
+        List of matching words (lower-cased, deduplicated, sorted).
+        Returns ``[term]`` unchanged when:
+          - the term contains no wildcards, or
+          - NLTK is unavailable, or
+          - no matches are found (avoids silent zero-result queries).
+
+    Examples:
+        >>> expand_wildcards("analy?e")       # doctest: +SKIP
+        ['analyse', 'analyze']
+        >>> expand_wildcards("no_wildcard")
+        ['no_wildcard']
+        >>> expand_wildcards("optimiz*")      # doctest: +SKIP
+        ['optimize', 'optimized', 'optimizes', 'optimizing', ...]
+    """
+    # Fast path: no wildcard characters present
+    if "?" not in term and "*" not in term:
+        return [term]
+
+    # Load wordlist lazily if caller did not supply one
+    if wordlist is None:
+        wordlist = _load_wordlist()
+
+    # Graceful fallback when NLTK is not installed
+    if wordlist is None:
+        return [term]
+
+    # Build a regex: ? → one char, * → zero-or-more chars
+    # Escape everything else so dots/parens in terms don't misbehave
+    escaped = re.escape(term)
+    pattern = (
+        escaped
+        .replace(re.escape("?"), r".")
+        .replace(re.escape("*"), r".*")
+    )
+    regex = re.compile(r"^" + pattern + r"$", re.IGNORECASE)
+
+    matches = sorted(
+        {w for w in wordlist if regex.match(w)}
+    )[:max_variants]
+
+    # If the pattern matches nothing, keep the original term as-is so the
+    # caller's query still runs (better a near-miss than zero results).
+    return matches if matches else [term]
+
+
+def apply_wildcards_to_keywords(
+    keywords: list[str],
+    wordlist: set[str] | None = None,
+) -> list[str]:
+    """
+    Expand any wildcard patterns inside a keyword list.
+
+    Each keyword that contains ``?`` or ``*`` is replaced by its expanded
+    variants wrapped in parentheses and joined with OR, e.g.::
+
+        ["analy?e", "agent"]
+        → ["(analyse OR analyze)", "agent"]
+
+    Keywords without wildcards are returned unchanged.
+
+    The wordlist is loaded once and reused for all terms in the list,
+    avoiding redundant corpus loads.
+
+    Args:
+        keywords: List of raw keyword strings (may contain wildcards).
+        wordlist: Pre-loaded word set for ``expand_wildcards()``.  When
+                  ``None``, the corpus is loaded once internally.
+
+    Returns:
+        New list of the same length where wildcard terms have been
+        replaced by their ``(v1 OR v2 OR ...)`` expansions.
+
+    Examples:
+        >>> apply_wildcards_to_keywords(["analy?e", "agent"])  # doctest: +SKIP
+        ['(analyse OR analyze)', 'agent']
+        >>> apply_wildcards_to_keywords(["agent"])             # no wildcards
+        ['agent']
+    """
+    if not any("?" in kw or "*" in kw for kw in keywords):
+        return keywords  # fast path: nothing to expand
+
+    # Load corpus once for all terms
+    wl = wordlist if wordlist is not None else _load_wordlist()
+
+    result: list[str] = []
+    for kw in keywords:
+        if "?" not in kw and "*" not in kw:
+            result.append(kw)
+        else:
+            variants = expand_wildcards(kw, wordlist=wl)
+            if len(variants) == 1 and variants[0] == kw:
+                # No expansion possible — pass through unchanged
+                result.append(kw)
+            else:
+                result.append("(" + " OR ".join(variants) + ")")
+    return result
 
 
 # ──────────────────────────────────────────────
@@ -1167,16 +1333,18 @@ def find_repo_of_the_day(
     use_snapshots: bool = True,
     output_fmt: Literal["text", "json", "csv"] = "text",
     output_file: str | None = None,
+    wildcard: bool = False,
 ) -> None:
     """
     Fetch, display/export, and optionally snapshot the top repos of the day.
 
     Orchestration order:
       1. Print session header (text mode only).
-      2. Load previous snapshot (if use_snapshots).
-      3. Fetch repos via search_trending_repos().
-      4. Render output in the requested format.
-      5. Save new snapshot baseline (if use_snapshots).
+      2. Apply wildcard expansion to keywords (if wildcard=True).
+      3. Load previous snapshot (if use_snapshots).
+      4. Fetch repos via search_trending_repos().
+      5. Render output in the requested format.
+      6. Save new snapshot baseline (if use_snapshots).
 
     Args:
         language:    Language filter. Default: None (all languages).
@@ -1190,6 +1358,8 @@ def find_repo_of_the_day(
         use_snapshots: Load/save velocity snapshots. Default: True.
         output_fmt:  Output format: "text" (default), "json", or "csv".
         output_file: Write output to this file path instead of stdout.
+        wildcard:    Expand ? and * patterns in keywords via NLTK corpus.
+                     Default: False.
 
     Returns:
         None
@@ -1197,6 +1367,10 @@ def find_repo_of_the_day(
     Raises:
         SystemExit(1): On GitHub API errors.
     """
+    # Apply wildcard expansion before anything else
+    if wildcard and keywords:
+        keywords = apply_wildcards_to_keywords(keywords)
+
     if output_fmt == "text":
         print(f"\n{'#' * 70}")
         print(f"  daily-github-pulse v{VERSION}  —  {date.today().isoformat()}")
@@ -1214,6 +1388,8 @@ def find_repo_of_the_day(
         print(f"  Auth     : {auth}")
         snap_status = "enabled" if use_snapshots else "disabled (--no-snapshot)"
         print(f"  Velocity : {snap_status}")
+        if wildcard:
+            print(f"  Wildcard : enabled")
         print(f"{'#' * 70}\n")
 
     snapshots = load_snapshots() if use_snapshots else {}
@@ -1409,6 +1585,12 @@ Examples:
   # Full Boolean query via parser
   python github_repo_of_the_day.py --bool-query '(LLM OR GPT) AND agent AND NOT benchmark'
 
+  # Wildcard expansion: analy?e → analyse OR analyze
+  python github_repo_of_the_day.py --keywords "analy?e" --wildcard
+
+  # Wildcard expansion: optimiz* → optimize, optimized, optimizing, ...
+  python github_repo_of_the_day.py --keywords "optimiz*" agent --wildcard
+
   # Search in README too (slower)
   python github_repo_of_the_day.py --keywords MCP server --search-in name,description,readme
 
@@ -1422,6 +1604,10 @@ Token setup:
   Create a .env file:  GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxx
   Add .env to .gitignore.
   Get a token: https://github.com/settings/tokens
+
+Wildcard setup (one-time):
+  pip install nltk
+  # corpus downloads automatically on first --wildcard run
         """,
     )
 
@@ -1489,6 +1675,16 @@ Token setup:
         ),
     )
     parser.add_argument(
+        "--wildcard",
+        action="store_true",
+        help=(
+            "Expand wildcard patterns in --keywords before querying GitHub. "
+            "? matches one character, * matches zero or more. "
+            "Requires: pip install nltk  (corpus auto-downloaded on first use). "
+            "Example: --keywords 'analy?e' → analyse OR analyze"
+        ),
+    )
+    parser.add_argument(
         "--output", "-o",
         choices=["text", "json", "csv"],
         default="text",
@@ -1551,16 +1747,12 @@ Token setup:
         )
     else:
         if bool_query_ast is not None:
-            # Pass the AST directly; build_keyword_qualifier handles it inside
-            # search_trending_repos via the keyword_qualifier override path.
-            # We serialise here and pass as a pre-built legacy keyword string
-            # to avoid adding a new parameter to find_repo_of_the_day.
             kq = build_keyword_qualifier(bool_query_ast, search_in=args.search_in)
             find_repo_of_the_day(
                 language=args.language,
                 since_days=effective_days,
                 top_n=args.top,
-                keyword=kq,   # pre-serialised; search_trending_repos wraps it correctly
+                keyword=kq,
                 search_in=args.search_in,
                 use_snapshots=not args.no_snapshot,
                 output_fmt=args.output,
@@ -1579,4 +1771,5 @@ Token setup:
                 use_snapshots=not args.no_snapshot,
                 output_fmt=args.output,
                 output_file=args.output_file,
+                wildcard=args.wildcard,
             )
