@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-daily-github-pulse  v1.6.1
+daily-github-pulse  v1.7.0
 ──────────────────────────
 Discover GitHub's top repositories AND developers of the day — with real star velocity.
 
@@ -53,7 +53,7 @@ except ImportError:
 # ──────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────
-VERSION = "1.6.1"
+VERSION = "1.7.0"
 SNAPSHOT_DIR = Path.home() / ".daily-github-pulse"
 SNAPSHOT_FILE = SNAPSHOT_DIR / "snapshots.json"
 
@@ -305,14 +305,27 @@ def search_trending_repos(
     """
     Query the GitHub Search API and return top repositories by category.
 
-    Uses two complementary strategies since GitHub has no official trending
-    endpoint:
+    Two operating modes with different category labels and star thresholds:
 
-    - New Today     — recently created repos with >10 stars (newcomers).
-    - Active Giants — recently pushed repos with >1000 stars (veterans).
+    Browse mode (no keyword)
+    ────────────────────────
+    - New Today     — recently created repos with >10 stars.
+                      Low threshold is intentional: the user is exploring,
+                      not filtering. Recency is the primary signal.
+    - Active Giants — recently pushed repos with >1000 stars.
+                      High threshold keeps only established, high-quality repos.
 
-    Repos appearing in both result sets are deduplicated — shown only in
-    the first category that returns them.
+    Search mode (keyword provided)
+    ───────────────────────────────
+    - New & Relevant    — recently created repos with >50 stars.
+                          Raised from 10 to reduce low-quality noise when the
+                          user has a specific topic in mind.
+    - Active & Relevant — recently pushed repos with >500 stars.
+                          Lowered from 1000 to widen coverage for niche topics
+                          while still filtering out low-quality repos.
+
+    Both modes preserve the time dimension: ``since_days`` / ``--period``
+    is always applied via ``created:>=`` or ``pushed:>=``.
 
     Keyword quoting
     ───────────────
@@ -356,10 +369,29 @@ def search_trending_repos(
     # applies to the whole phrase, not just the last token.
     keyword_qualifier = f' "{keyword}" in:{search_in}' if keyword else ""
 
-    queries = {
-        "New Today": f"created:>={since_date} stars:>10{keyword_qualifier}",
-        "Active Giants": f"pushed:>={since_date} stars:>1000{keyword_qualifier}",
-    }
+    if keyword:
+        # Search mode: user has a specific topic in mind.
+        # stars:>50  on new repos  — filters low-quality noise while keeping
+        #            genuinely new projects that gained traction.
+        # stars:>500 on active repos — broad enough to cover niche topics,
+        #            strict enough to avoid repos with zero activity history.
+        queries = {
+            "New & Relevant": (
+                f"created:>={since_date} stars:>50{keyword_qualifier}"
+            ),
+            "Active & Relevant": (
+                f"pushed:>={since_date} stars:>500{keyword_qualifier}"
+            ),
+        }
+    else:
+        # Browse mode: user is exploring, not filtering.
+        # stars:>10   on new repos  — intentionally low; recency is the signal.
+        # stars:>1000 on active repos — keeps only established giants.
+        queries = {
+            "New Today": f"created:>={since_date} stars:>10",
+            "Active Giants": f"pushed:>={since_date} stars:>1000",
+        }
+
     if language:
         queries = {k: v + f" language:{language}" for k, v in queries.items()}
 
@@ -925,7 +957,7 @@ Examples:
   # JSON export, pipe into jq
   python github_repo_of_the_day.py --output json | jq '.[].full_name'
 
-  # Search by keyword
+  # Search by keyword (search mode: higher thresholds, less noise)
   python github_repo_of_the_day.py --keyword "LLM agent" --output json
 
   # Search in README too (slower)

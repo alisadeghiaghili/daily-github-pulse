@@ -364,10 +364,65 @@ class TestSearchTrendingRepos:
         }
 
     @patch("github_repo_of_the_day.requests.get")
-    def test_returns_two_categories(self, mock_get):
+    def test_browse_mode_returns_new_today_and_active_giants(self, mock_get):
+        """Without keyword, category labels must be 'New Today' and 'Active Giants'."""
         mock_get.return_value = _mock_response([self._repo(1, "owner/alpha")])
         result = m.search_trending_repos()
         assert set(result.keys()) == {"New Today", "Active Giants"}
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_search_mode_returns_new_relevant_and_active_relevant(self, mock_get):
+        """With keyword, category labels must be 'New & Relevant' and 'Active & Relevant'."""
+        mock_get.return_value = _mock_response([self._repo(1, "owner/alpha")])
+        result = m.search_trending_repos(keyword="LLM")
+        assert set(result.keys()) == {"New & Relevant", "Active & Relevant"}
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_browse_mode_new_today_uses_stars_gt_10(self, mock_get):
+        """Browse mode: 'New Today' query must use stars:>10 threshold."""
+        mock_get.return_value = _mock_response([])
+        m.search_trending_repos(keyword=None)
+        calls = mock_get.call_args_list
+        new_today_query = calls[0].kwargs["params"]["q"]
+        assert "stars:>10" in new_today_query
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_browse_mode_active_giants_uses_stars_gt_1000(self, mock_get):
+        """Browse mode: 'Active Giants' query must use stars:>1000 threshold."""
+        mock_get.return_value = _mock_response([])
+        m.search_trending_repos(keyword=None)
+        calls = mock_get.call_args_list
+        active_giants_query = calls[1].kwargs["params"]["q"]
+        assert "stars:>1000" in active_giants_query
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_search_mode_new_relevant_uses_stars_gt_50(self, mock_get):
+        """Search mode: 'New & Relevant' query must use stars:>50 (not stars:>10)."""
+        mock_get.return_value = _mock_response([])
+        m.search_trending_repos(keyword="LLM agent")
+        calls = mock_get.call_args_list
+        new_relevant_query = calls[0].kwargs["params"]["q"]
+        assert "stars:>50" in new_relevant_query
+        assert "stars:>10" not in new_relevant_query
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_search_mode_active_relevant_uses_stars_gt_500(self, mock_get):
+        """Search mode: 'Active & Relevant' query must use stars:>500 (not stars:>1000)."""
+        mock_get.return_value = _mock_response([])
+        m.search_trending_repos(keyword="LLM agent")
+        calls = mock_get.call_args_list
+        active_relevant_query = calls[1].kwargs["params"]["q"]
+        assert "stars:>500" in active_relevant_query
+        assert "stars:>1000" not in active_relevant_query
+
+    @patch("github_repo_of_the_day.requests.get")
+    def test_search_mode_preserves_time_dimension(self, mock_get):
+        """Both search-mode queries must still include created:/pushed: time filter."""
+        mock_get.return_value = _mock_response([])
+        m.search_trending_repos(keyword="MCP", since_days=7)
+        for call_args in mock_get.call_args_list:
+            query = call_args.kwargs["params"]["q"]
+            assert "created:>=" in query or "pushed:>=" in query
 
     @patch("github_repo_of_the_day.requests.get")
     def test_deduplication_across_categories(self, mock_get):
