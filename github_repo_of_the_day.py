@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 daily-github-pulse  v2.2.0
-──────────────────────────
+Discover GitHub's top trending repositories and developers of the day —
+with real star velocity, boolean keyword search, wildcard expansion,
+and AI relevance filtering.
+──────────────────────────────────────────────────────────────────────
 Run it once. See what's blowing up on GitHub right now.
 
   python github_repo_of_the_day.py                    # today's hottest repos
@@ -1493,4 +1496,335 @@ def apply_ai_filter(
         verbose:           Print per-repo progress to stderr (default: True).
 
     Returns:
-        N
+        New dict with same structure as input, containing only relevant repos.
+
+    Raises:
+        RuntimeError: If an LLM call fails and ``fallback`` is ``"fail"``.
+        ValueError:   If ``fallback`` is not ``"fail"`` or ``"passthrough"``.
+    """
+    if fallback not in ("fail", "passthrough"):
+        raise ValueError(
+            f"Invalid fallback '{fallback}'. Valid options: 'fail', 'passthrough'."
+        )
+
+    filtered: dict = {}
+
+    for category, repos in repos_by_category.items():
+        kept: list[dict] = []
+        for repo in repos:
+            try:
+                relevant, reason = is_repo_relevant(repo, query, config)
+            except RuntimeError as exc:
+                if fallback == "passthrough":
+                    print(
+                        f"  ⚠  LLM unavailable — showing all results unfiltered.\n"
+                        f"     ({exc})",
+                        file=sys.stderr,
+                    )
+                    return repos_by_category
+                raise
+
+            if verbose:
+                mark = "✓" if relevant else "✗"
+                print(
+                    f"  {mark} {repo['full_name']}  — {reason}",
+                    file=sys.stderr,
+                )
+            if relevant:
+                kept.append(repo)
+
+        filtered[category] = kept
+
+    return filtered
+
+
+# ──────────────────────────────────────────────
+# CLI helpers
+# ──────────────────────────────────────────────
+
+def _build_arg_parser():
+    """Build and return the CLI argument parser."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="github_repo_of_the_day",
+        description=(
+            "Discover GitHub's top trending repositories and developers — "
+            "with real star velocity, boolean search, wildcard expansion, "
+            "and AI relevance filtering."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+
+    # ── What to show ──────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--developers", action="store_true",
+        help="Show trending developers instead of repositories.",
+    )
+
+    # ── Time window ───────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--days", type=int, default=1, metavar="N",
+        help="Look-back window in days (default: 1).  Overridden by --period.",
+    )
+    parser.add_argument(
+        "--period", choices=list(PERIOD_DAYS), default=None,
+        help="Named look-back period: day, week, month.  Overrides --days.",
+    )
+
+    # ── Filters ───────────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--language", default=None, metavar="LANG",
+        help="Filter by programming language (e.g. python, rust, go).",
+    )
+    parser.add_argument(
+        "--top", type=int, default=10, metavar="N",
+        help="Number of results per category (default: 10).",
+    )
+
+    # ── Keyword search ────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--keyword", default=None, metavar="TERM",
+        help="Single keyword filter (legacy; use --keywords for multiple terms).",
+    )
+    parser.add_argument(
+        "--keywords", nargs="+", default=None, metavar="TERM",
+        help="One or more keyword terms.  Combined with --keyword-op.",
+    )
+    parser.add_argument(
+        "--keyword-op", choices=["AND", "OR"], default="AND",
+        help="Boolean operator for --keywords (default: AND).",
+    )
+    parser.add_argument(
+        "--keyword-not", nargs="+", default=None, metavar="TERM",
+        help="Terms to exclude from --keywords search.",
+    )
+    parser.add_argument(
+        "--search-in",
+        default="name,description",
+        metavar="FIELDS",
+        help=(
+            "Comma-separated fields to search in.  "
+            "Valid: name, description, readme (default: name,description)."
+        ),
+    )
+    parser.add_argument(
+        "--bool-query", default=None, metavar="EXPR",
+        help=(
+            "Boolean keyword expression, e.g. "
+            "'(LLM OR GPT) AND agent AND NOT benchmark'."
+        ),
+    )
+    parser.add_argument(
+        "--wildcard", action="store_true",
+        help=(
+            "Expand ? and * wildcards in --keywords against the NLTK word corpus.  "
+            "Requires: pip install nltk"
+        ),
+    )
+
+    # ── AI filter ─────────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--ai-filter", action="store_true",
+        help="Enable LLM-based relevance filtering.",
+    )
+    parser.add_argument(
+        "--ai-filter-query", default=None, metavar="QUERY",
+        help="Natural-language description of what you're looking for.",
+    )
+    parser.add_argument(
+        "--ai-filter-fallback",
+        choices=["fail", "passthrough"],
+        default="fail",
+        help=(
+            "Behaviour when the LLM is unavailable: "
+            "'fail' (default) exits with error; "
+            "'passthrough' shows all repos unfiltered."
+        ),
+    )
+
+    # ── GitHub token ──────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--token", default=None, metavar="TOKEN",
+        help=(
+            "GitHub personal access token.  "
+            "Overrides GITHUB_TOKEN env var.  "
+            "Raises rate limit from 60 to 5,000 req/hr."
+        ),
+    )
+
+    # ── Output ────────────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--output", choices=["text", "json", "csv"], default="text",
+        help="Output format (default: text).",
+    )
+    parser.add_argument(
+        "--output-file", default=None, metavar="PATH",
+        help="Write output to this file instead of stdout.",
+    )
+
+    return parser
+
+
+# ──────────────────────────────────────────────
+# Entry point
+# ──────────────────────────────────────────────
+
+def main() -> None:
+    """Parse CLI arguments and run the requested search."""
+    global GITHUB_TOKEN  # noqa: PLW0603
+
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+
+    # Token override
+    if args.token:
+        GITHUB_TOKEN = args.token
+
+    # Resolve look-back window
+    try:
+        since_days = resolve_period(args.period, args.days)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    # ── Developer mode ────────────────────────────────────────────────────────
+    if args.developers:
+        print(
+            f"\n🔍  Trending Developers  "
+            f"(last {since_days} day{'s' if since_days != 1 else ''})\n",
+            file=sys.stderr,
+        )
+        try:
+            developers = search_trending_developers(
+                language=args.language,
+                since_days=since_days,
+                top_n=args.top,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"Error fetching developers: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+        if args.output == "text":
+            for i, user in enumerate(developers, start=1):
+                print(format_developer(user, i))
+        else:
+            rows = [build_dev_export_row(u, i) for i, u in enumerate(developers, start=1)]
+            if args.output == "json":
+                write_output(export_json(rows), args.output_file, "json")
+            else:
+                write_output(
+                    export_csv(rows, DEV_EXPORT_FIELDS), args.output_file, "csv"
+                )
+        return
+
+    # ── Boolean query parse ───────────────────────────────────────────────────
+    bool_query_ast = None
+    if args.bool_query:
+        try:
+            bool_query_ast = parse_boolean_query(args.bool_query)
+        except ValueError as exc:
+            parser.error(str(exc))
+
+    # ── Wildcard expansion ────────────────────────────────────────────────────
+    effective_keywords = args.keywords
+    if args.wildcard and effective_keywords:
+        effective_keywords = apply_wildcards_to_keywords(effective_keywords)
+
+    # ── Repository search ─────────────────────────────────────────────────────
+    print(
+        f"\n🔍  Trending Repositories  "
+        f"(last {since_days} day{'s' if since_days != 1 else ''})\n",
+        file=sys.stderr,
+    )
+    try:
+        repos_by_category = search_trending_repos(
+            language=args.language,
+            since_days=since_days,
+            top_n=args.top,
+            keyword=args.keyword,
+            keywords=effective_keywords,
+            keyword_op=args.keyword_op,
+            keyword_not=args.keyword_not,
+            search_in=args.search_in,
+            bool_query=bool_query_ast,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        print(f"Error fetching repositories: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    # ── AI filter ─────────────────────────────────────────────────────────────
+    if args.ai_filter:
+        ai_query = args.ai_filter_query
+        if not ai_query:
+            parser.error("--ai-filter requires --ai-filter-query.")
+
+        ai_config = load_ai_filter_config()
+        if ai_config is None:
+            if args.ai_filter_fallback == "passthrough":
+                print(
+                    "  ⚠  No AI credentials found — showing all results unfiltered.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "  ✗  No AI credentials found.  "
+                    "Set AI_API_KEY (or ANTHROPIC_API_KEY) in .env.\n"
+                    "     Use --ai-filter-fallback=passthrough to skip filtering.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        else:
+            print(
+                f"  🤖  AI filter active  [{ai_config.provider} / {ai_config.model}]\n"
+                f"      Query: \"{ai_query}\"\n",
+                file=sys.stderr,
+            )
+            try:
+                repos_by_category = apply_ai_filter(
+                    repos_by_category,
+                    query=ai_query,
+                    config=ai_config,
+                    fallback=args.ai_filter_fallback,
+                    verbose=True,
+                )
+            except RuntimeError as exc:
+                print(f"AI filter error: {exc}", file=sys.stderr)
+                sys.exit(1)
+
+    # ── Load snapshots for velocity ───────────────────────────────────────────
+    snapshots = load_snapshots()
+
+    # ── Render output ─────────────────────────────────────────────────────────
+    if args.output == "text":
+        for category, repos in repos_by_category.items():
+            print(f"\n{'─' * 70}")
+            print(f"  {category.upper()}  ({len(repos)} results)")
+            print(f"{'─' * 70}\n")
+            if not repos:
+                print("  (no results)\n")
+                continue
+            for i, repo in enumerate(repos, start=1):
+                print(format_repo(repo, i, snapshots))
+    else:
+        all_rows = []
+        for category, repos in repos_by_category.items():
+            for i, repo in enumerate(repos, start=1):
+                all_rows.append(build_export_row(repo, i, category, snapshots))
+
+        if args.output == "json":
+            write_output(export_json(all_rows), args.output_file, "json")
+        else:
+            write_output(export_csv(all_rows, EXPORT_FIELDS), args.output_file, "csv")
+
+    # ── Persist snapshots ─────────────────────────────────────────────────────
+    try:
+        save_snapshots(repos_by_category)
+    except OSError as exc:
+        print(f"  ⚠  Could not save snapshots: {exc}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
