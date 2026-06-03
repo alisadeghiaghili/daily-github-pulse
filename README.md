@@ -5,6 +5,7 @@
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://python.org)
 [![Tests](https://github.com/alisadeghiaghili/daily-github-pulse/actions/workflows/tests.yml/badge.svg)](https://github.com/alisadeghiaghili/daily-github-pulse/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Contributing](https://img.shields.io/badge/contributions-welcome-brightgreen)](CONTRIBUTING.md)
 
 ---
 
@@ -42,11 +43,8 @@ git clone https://github.com/alisadeghiaghili/daily-github-pulse.git
 cd daily-github-pulse
 pip install -r requirements.txt
 
-# Optional: wildcard expansion
+# Optional: wildcard expansion support
 pip install nltk
-
-# Optional: AI relevance filter (OpenAI-compatible)
-pip install requests  # already in requirements
 
 # Optional: AI relevance filter (Anthropic)
 pip install anthropic
@@ -357,6 +355,12 @@ pytest tests/ -v
 ```
 
 All 136 tests run without network access (GitHub API calls are fully mocked).
+
+---
+
+## Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions, code style, commit conventions, and the PR checklist.
 
 ---
 
