@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-daily-github-pulse  v2.2.0
+daily-github-pulse  v2.3.0
 Discover GitHub's top trending repositories and developers of the day —
 with real star velocity, boolean keyword search, wildcard expansion,
 and AI relevance filtering.
@@ -136,9 +136,25 @@ except ImportError:
     pass  # python-dotenv is optional
 
 # ──────────────────────────────────────────────
+# Rich display — optional, graceful fallback
+# ──────────────────────────────────────────────
+try:
+    from rich_display import (
+        print_header,
+        print_repo_table,
+        print_developer_table,
+        RICH_AVAILABLE,
+    )
+except ImportError:
+    RICH_AVAILABLE = False
+    print_header = None          # type: ignore[assignment]
+    print_repo_table = None      # type: ignore[assignment]
+    print_developer_table = None # type: ignore[assignment]
+
+# ──────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 SNAPSHOT_DIR = Path.home() / ".daily-github-pulse"
 SNAPSHOT_FILE = SNAPSHOT_DIR / "snapshots.json"
 
@@ -1165,7 +1181,7 @@ def write_output(content: str, output_file: str | None, fmt: str) -> None:
 
 
 # ──────────────────────────────────────────────
-# Text formatting (human-readable)
+# Text formatting (human-readable, plain-text fallback)
 # ──────────────────────────────────────────────
 def format_velocity(delta: int | None, velocity: float | None = None) -> str:
     """
@@ -1690,11 +1706,14 @@ def main() -> None:
 
     # ── Developer mode ────────────────────────────────────────────────────────
     if args.developers:
-        print(
-            f"\n🔍  Trending Developers  "
-            f"(last {since_days} day{'s' if since_days != 1 else ''})\n",
-            file=sys.stderr,
-        )
+        if RICH_AVAILABLE and print_header:
+            print_header(since_days, mode="developers")
+        else:
+            print(
+                f"\n🔍  Trending Developers  "
+                f"(last {since_days} day{'s' if since_days != 1 else ''})\n",
+                file=sys.stderr,
+            )
         try:
             developers = search_trending_developers(
                 language=args.language,
@@ -1706,8 +1725,11 @@ def main() -> None:
             sys.exit(1)
 
         if args.output == "text":
-            for i, user in enumerate(developers, start=1):
-                print(format_developer(user, i))
+            if RICH_AVAILABLE and print_developer_table:
+                print_developer_table(developers)
+            else:
+                for i, user in enumerate(developers, start=1):
+                    print(format_developer(user, i))
         else:
             rows = [build_dev_export_row(u, i) for i, u in enumerate(developers, start=1)]
             if args.output == "json":
@@ -1732,11 +1754,14 @@ def main() -> None:
         effective_keywords = apply_wildcards_to_keywords(effective_keywords)
 
     # ── Repository search ─────────────────────────────────────────────────────
-    print(
-        f"\n🔍  Trending Repositories  "
-        f"(last {since_days} day{'s' if since_days != 1 else ''})\n",
-        file=sys.stderr,
-    )
+    if RICH_AVAILABLE and print_header:
+        print_header(since_days, mode="repos")
+    else:
+        print(
+            f"\n🔍  Trending Repositories  "
+            f"(last {since_days} day{'s' if since_days != 1 else ''})\n",
+            file=sys.stderr,
+        )
     try:
         repos_by_category = search_trending_repos(
             language=args.language,
@@ -1799,15 +1824,18 @@ def main() -> None:
 
     # ── Render output ─────────────────────────────────────────────────────────
     if args.output == "text":
-        for category, repos in repos_by_category.items():
-            print(f"\n{'─' * 70}")
-            print(f"  {category.upper()}  ({len(repos)} results)")
-            print(f"{'─' * 70}\n")
-            if not repos:
-                print("  (no results)\n")
-                continue
-            for i, repo in enumerate(repos, start=1):
-                print(format_repo(repo, i, snapshots))
+        if RICH_AVAILABLE and print_repo_table:
+            print_repo_table(repos_by_category, snapshots)
+        else:
+            for category, repos in repos_by_category.items():
+                print(f"\n{'─' * 70}")
+                print(f"  {category.upper()}  ({len(repos)} results)")
+                print(f"{'─' * 70}\n")
+                if not repos:
+                    print("  (no results)\n")
+                    continue
+                for i, repo in enumerate(repos, start=1):
+                    print(format_repo(repo, i, snapshots))
     else:
         all_rows = []
         for category, repos in repos_by_category.items():
