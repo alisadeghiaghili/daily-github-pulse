@@ -23,12 +23,17 @@ python github_repo_of_the_day.py
 
 خروجی: repo‌هایی که **امروز** بیشترین سرعت ستاره‌گیری داشتن، به همراه نرخ رشد روزانه — نه فقط تعداد کل ستاره.
 
+اگر `rich` نصب باشه، خروجی به صورت جدول رنگی با لینک‌های کلیکی نمایش داده می‌شه:
+
 ```
-======================================================================
-#1  openai/openai-python
-    Stars: 24,312  Forks: 3,201  Lang: Python
-  Δ +418 ⭐ total  |  ~418.0 ⭐/day
-    https://github.com/openai/openai-python
+╭──────────────────────────────────────────────────────────────╮
+│  🔍  Trending Repositories  — last 1 day                     │
+╰──────────────────────────────────────────────────────────────╯
+
+  #   Repository              ⭐ Stars    Δ Stars          Lang        Description
+ ─────────────────────────────────────────────────────────────────────────────────
+  1   openai/openai-python    24,312    +418 ⭐ ~418/day   Python      OpenAI Python client
+  2   astral-sh/uv            18,901    +312 ⭐ ~312/day   Rust        Fast Python package manager
 ```
 
 ---
@@ -38,7 +43,7 @@ python github_repo_of_the_day.py
 ```bash
 git clone https://github.com/alisadeghiaghili/daily-github-pulse.git
 cd daily-github-pulse
-pip install -r requirements.txt
+pip install -r requirements.txt      # شامل rich برای خروجی رنگی
 
 # توصیه می‌شه: توکن GitHub اضافه کن (۵۰۰۰ درخواست/ساعت)
 cp .env.example .env
@@ -84,6 +89,7 @@ python github_repo_of_the_day.py --keywords LLM --ai-filter --ai-filter-query "i
 | `analyz*` رو باید دستی expand کنی | **Wildcard expansion** با NLTK: `analy?e` → `analyse OR analyze` |
 | نتایج پر از paper و survey هست | **AI filter** — به زبان طبیعی بگو دنبال چی هستی |
 | هر بار از صفر شروع می‌کنی | **Snapshot** — delta ستاره نسبت به آخرین اجرا |
+| خروجی plain text خوانا نیست | **Rich UI** — جدول رنگی، لینک کلیکی، progress bar |
 
 ---
 
@@ -115,6 +121,24 @@ python github_repo_of_the_day.py --keywords LLM --ai-filter --ai-filter-query "i
 | احراز هویت | `--token TOKEN` | توکن GitHub (جایگزین .env) |
 
 </details>
+
+---
+
+## خروجی Rich (اختیاری)
+
+`rich` به عنوان یک dependency پیشنهادی در `requirements.txt` قرار داره. اگر نصب باشه:
+
+- جداول رنگی با border گرد
+- لینک‌های کلیکی روی نام repo و developer
+- رنگ‌بندی زبان‌ها (Python → زرد، Rust → قرمز، Go → آبی‌فیروزه‌ای، ...)
+- Δ stars به رنگ سبز (مثبت) یا قرمز (منفی)
+- Progress bar برای مرحله AI filter
+
+بدون `rich`، ابزار دقیقاً مثل قبل کار می‌کنه (plain-text fallback).
+
+```bash
+pip install rich   # یه بار کافیه
+```
 
 ---
 
@@ -181,7 +205,12 @@ pip install pytest
 pytest tests/ -v
 ```
 
-۱۳۶ تست، بدون نیاز به اینترنت (GitHub API کاملاً mock شده).
+**۱۷۶ تست**، بدون نیاز به اینترنت (GitHub API کاملاً mock شده).
+
+| فایل تست | پوشش |
+|---|---|
+| `tests/test_github_repo.py` | همه توابع اصلی، search، boolean، wildcard، snapshot |
+| `tests/test_rich_display.py` | همه توابع `rich_display.py`، rich و fallback paths |
 
 ---
 

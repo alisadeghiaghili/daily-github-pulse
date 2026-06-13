@@ -21,12 +21,17 @@ python github_repo_of_the_day.py
 
 You get a ranked list of repositories that gained the most stars **today**, along with a real daily growth rate — not just a total star count.
 
+If `rich` is installed the output renders as a colour table with clickable links:
+
 ```
-======================================================================
-#1  openai/openai-python
-    Stars: 24,312  Forks: 3,201  Lang: Python
-  Δ +418 ⭐ total  |  ~418.0 ⭐/day
-    https://github.com/openai/openai-python
+╭──────────────────────────────────────────────────────────────╮
+│  🔍  Trending Repositories  — last 1 day                     │
+╰──────────────────────────────────────────────────────────────╯
+
+  #   Repository              ⭐ Stars    Δ Stars          Lang        Description
+ ─────────────────────────────────────────────────────────────────────────────────
+  1   openai/openai-python    24,312    +418 ⭐ ~418/day   Python      OpenAI Python client
+  2   astral-sh/uv            18,901    +312 ⭐ ~312/day   Rust        Fast Python package manager
 ```
 
 ---
@@ -36,7 +41,7 @@ You get a ranked list of repositories that gained the most stars **today**, alon
 ```bash
 git clone https://github.com/alisadeghiaghili/daily-github-pulse.git
 cd daily-github-pulse
-pip install -r requirements.txt
+pip install -r requirements.txt      # includes rich for coloured output
 
 # Recommended: add a GitHub token (raises limit from 60 to 5,000 req/hr)
 cp .env.example .env
@@ -82,6 +87,25 @@ python github_repo_of_the_day.py --keywords LLM --ai-filter --ai-filter-query "p
 | Wildcard patterns require manual expansion | **Wildcard expansion** via NLTK: `analy?e` → `analyse OR analyze` |
 | Results are flooded with papers and surveys | **AI filter** — describe your intent in plain English |
 | Every run starts from zero | **Snapshots** — star delta since your last run |
+| Plain-text output is hard to scan | **Rich UI** — colour tables, clickable links, progress bar |
+
+---
+
+## Rich Terminal Output (optional)
+
+`rich` is included as a recommended dependency in `requirements.txt`. When installed:
+
+- Rounded colour tables with per-column styles
+- Clickable hyperlinks on repo and developer names
+- Language colour-coding (Python → yellow, Rust → red, Go → cyan, …)
+- Δ Stars in green (positive) or red (negative)
+- Spinner + progress bar during the AI filter stage
+
+Without `rich` the tool falls back to its original plain-text output automatically — no crash, no warning.
+
+```bash
+pip install rich   # one-time install
+```
 
 ---
 
@@ -159,7 +183,7 @@ python github_repo_of_the_day.py --keywords "optimiz*" agent --wildcard
 # Default: name and description only
 python github_repo_of_the_day.py --keywords MCP server
 
-# Also search README content (slower — one extra API call per page)
+# Also search README content
 python github_repo_of_the_day.py --keywords MCP server -s name,description,readme
 ```
 
@@ -278,7 +302,12 @@ pip install pytest
 pytest tests/ -v
 ```
 
-136 tests — no network access required (GitHub API is fully mocked).
+**176 tests** — no network access required (GitHub API is fully mocked).
+
+| Test file | Coverage |
+|---|---|
+| `tests/test_github_repo.py` | All core functions, search, boolean parser, wildcard, snapshots |
+| `tests/test_rich_display.py` | All `rich_display.py` public functions, rich + fallback paths |
 
 ---
 

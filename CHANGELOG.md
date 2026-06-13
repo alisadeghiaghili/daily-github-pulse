@@ -6,6 +6,32 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.3.0] — 2026-06-13
+
+### Added
+- **`rich_display.py`** — full Rich-powered terminal renderer as an optional drop-in:
+  - `print_header(since_days, mode)` — styled Panel header with cyan border
+  - `print_repo_table(repos_by_category, snapshots)` — rounded table with columns: rank, repo (clickable link), stars, Δ stars (green/red), forks, language (colour-coded per language), description
+  - `print_developer_table(developers)` — rounded table with followers, repos, company, location, bio
+  - `make_ai_filter_progress()` — Rich Progress bar for AI filtering stage
+  - `format_velocity_markup(delta, velocity)` — Rich markup helper for delta / velocity cells
+  - Language → colour mapping for 20+ languages (Python → yellow, Rust → red, Go → cyan, …)
+  - Graceful no-op fallback when `rich` is not installed — plain-text output unchanged
+- **`tests/test_rich_display.py`** — 40 new tests covering all public functions in `rich_display.py`:
+  - `RICH_AVAILABLE` flag detection
+  - `format_velocity_markup` — None (first run), positive, negative, zero, with/without velocity
+  - `print_header` — rich and fallback paths, stdout vs stderr routing
+  - `print_repo_table` — table rendered, clickable links, colour badges, delta colours, empty category
+  - `print_developer_table` — all columns, missing fields fallback, clickable login links
+  - `make_ai_filter_progress` — returns Progress instance vs None
+
+### Changed
+- `requirements.txt` — `rich>=13.7.0` promoted to a **recommended** (soft) dependency with clear inline comments for every optional group
+- `README.md` / `README.en.md` / `README.de.md` — updated Quick Start, features table, and test count (now 176 tests)
+- Version bumped to `2.3.0`
+
+---
+
 ## [2.0.0] — 2026-06-02
 
 ### Added

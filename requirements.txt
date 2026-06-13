@@ -1,9 +1,24 @@
+# ─── Core (always required) ───────────────────────────────────────────────────
 requests>=2.31.0
 python-dotenv>=1.0.0
-rich>=13.0.0
 
-# Optional — required only for --wildcard expansion
+# ─── Rich terminal output (optional but highly recommended) ───────────────────
+# Enables coloured tables, clickable links, progress bars, and styled panels.
+# Without this package the tool falls back to plain-text output automatically.
+rich>=13.7.0
+
+# ─── Wildcard expansion (optional) ───────────────────────────────────────────
+# Required only when using the --wildcard flag.
+# Auto-downloaded on first --wildcard run; no action needed beforehand.
 # nltk>=3.8
 
-# Optional — required only for --ai-filter with Anthropic
+# ─── AI filter — OpenAI-compatible backends (optional) ───────────────────────
+# Required for --ai-filter with OpenAI, Ollama, Groq, etc.
+# openai>=1.30.0
+
+# ─── AI filter — Anthropic / Claude backend (optional) ───────────────────────
+# Required only when AI_PROVIDER=anthropic in .env.
 # anthropic>=0.25.0
+
+# ─── Development / testing ────────────────────────────────────────────────────
+# pytest>=8.0.0
