@@ -1,5 +1,9 @@
 requests>=2.31.0
 python-dotenv>=1.0.0
+rich>=13.0.0
 
 # Optional — required only for --wildcard expansion
 # nltk>=3.8
+
+# Optional — required only for --ai-filter with Anthropic
+# anthropic>=0.25.0
