@@ -2,7 +2,7 @@
 
 # daily-github-pulse
 
-> هر روز بدونید روی GitHub چه داره می‌جوشه.
+> هر روز بدونید روی GitHub, GitLab, Gitea و Bitbucket چه داره می‌جوشه.
 
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://python.org)
 [![Tests](https://github.com/alisadeghiaghili/daily-github-pulse/actions/workflows/tests.yml/badge.svg)](https://github.com/alisadeghiaghili/daily-github-pulse/actions)
@@ -13,12 +13,13 @@
 
 ---
 
-GitHub هر روز هزاران repo جدید داره. پیدا کردن اون‌هایی که **واقعاً** دارن رشد می‌کنن — نه فقط ستاره‌های تاریخی — وقت‌گیره.
-
-`daily-github-pulse` این کار رو به یه دستور ساده تبدیل می‌کنه:
+`daily-github-pulse` کشف trending را به یک دستور ساده تبدیل می‌کنه:
 
 ```bash
-python github_repo_of_the_day.py
+python daily_github_pulse.py                           # GitHub (پیش‌فرض)
+python daily_github_pulse.py --forge gitlab            # GitLab
+python daily_github_pulse.py --forge gitea --gitea-url https://codeberg.org
+python daily_github_pulse.py --forge github,gitlab     # ترکیب هر دو
 ```
 
 خروجی: repo‌هایی که **امروز** بیشترین سرعت ستاره‌گیری داشتن، به همراه نرخ رشد روزانه — نه فقط تعداد کل ستاره.
@@ -100,6 +101,8 @@ python github_repo_of_the_day.py --keywords LLM --ai-filter --ai-filter-query "i
 
 | دسته | فلگ | توضیح |
 |---|---|---|
+| Forge | `--forge NAME[,NAME...]` | پلتفرم جستجو: `github` (پیش‌فرض)، `gitlab`، `gitea`، `bitbucket` |
+| Forge | `--gitea-url URL` | آدرس نمونه Gitea/Codeberg |
 | حالت | `--developers` | توسعه‌دهنده‌های trending به جای repo |
 | فیلتر | `-l python` | زبان برنامه‌نویسی |
 | فیلتر | `-p week` | بازه زمانی: `day` / `week` / `month` |

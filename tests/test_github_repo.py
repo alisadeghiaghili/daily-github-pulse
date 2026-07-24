@@ -41,14 +41,6 @@ def _mock_response(items: list) -> MagicMock:
     return resp
 
 
-def _mock_user_response(user: dict) -> MagicMock:
-    """Build a mock requests.Response returning a single user dict."""
-    resp = MagicMock()
-    resp.json.return_value = user
-    resp.raise_for_status.return_value = None
-    return resp
-
-
 # ──────────────────────────────────────────────
 # Fixtures
 # ──────────────────────────────────────────────

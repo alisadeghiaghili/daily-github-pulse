@@ -6,6 +6,44 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [3.0.0] — 2026-07-24
+
+### Added
+- **Multi-forge support** — browse trending repos and developers across GitHub, GitLab, Gitea/Codeberg, and Bitbucket
+- **`forges/` package** — forge abstraction layer with `ForgeClient` ABC and per-forge implementations:
+  - `forges/base.py` — `ForgeClient` ABC + `ForgeRepo`/`ForgeUser` dataclasses
+  - `forges/github.py` — GitHub REST API v3 client
+  - `forges/gitlab.py` — GitLab REST API v4 client
+  - `forges/gitea.py` — Gitea/Codeberg REST API v1 client
+  - `forges/bitbucket.py` — Bitbucket REST API v2.0 client
+- **`--forge` CLI flag** — specify forge(s) to search, comma-separated for multi-forge
+- **`--gitea-url` CLI flag** — custom Gitea instance URL (e.g. Codeberg)
+- **`--gitlab-token` / `--gitea-token` CLI flags** — per-forge auth tokens
+- **Multi-forge parallel search** — searches multiple forges concurrently via `ThreadPoolExecutor`
+- **Merged & ranked output** — multi-forge results sorted by stars with visible forge labels
+- **Forge column in exports** — JSON/CSV exports now include a `forge` field
+- **Forge labels in Rich tables** — color-coded forge badges (GitHub=white, GitLab=red, Gitea=green, Bitbucket=blue)
+- **`daily_github_pulse.py`** — new main entry point for multi-forge support
+- **Forge-specific tests** — 37 new tests across `test_github.py`, `test_gitlab.py`, `test_gitea.py`, `test_bitbucket.py`
+
+### Changed
+- `github_repo_of_the_day.py` — now serves as backward-compat alias, version bumped to 3.0.0
+- `rich_display.py` — `print_repo_table()` and `print_developer_table()` now support ForgeRepo/ForgeUser objects with forge labels
+- `requirements.txt` — updated with multi-forge documentation and `pytest-cov` in dev section
+- `CONTRIBUTING.md` — updated project structure to reflect forge architecture
+
+### Fixed
+- Added `UnicodeDecodeError` handling in `fetch_readme_snippet()` for non-text READMEs
+- Fixed `_capture_console()` in tests to use `rd.console` instead of `rd._console`
+- Removed unused `_mock_user_response()` test helper
+- Added type hints: `_build_arg_parser()` return type, `BoolNode.children` type
+- Wired up `make_ai_filter_progress()` in AI filter path
+
+### Removed
+- Removed unused `_mock_user_response()` from test suite
+
+---
+
 ## [2.3.0] — 2026-06-13
 
 ### Added

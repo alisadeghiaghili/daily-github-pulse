@@ -157,10 +157,12 @@ def print_repo_table(repos_by_category: dict, snapshots: dict) -> None:
     Render all categories of repositories as Rich tables.
 
     One table per category, with columns:
-        #  |  Repository  |  Stars  |  Δ Stars  |  Forks  |  Lang  |  Description
+        #  |  Forge  |  Repository  |  Stars  |  Δ Stars  |  Forks  |  Lang  |  Description
+
+    Supports both legacy dict repos and ForgeRepo objects.
 
     Args:
-        repos_by_category: Output of ``search_trending_repos()``.
+        repos_by_category: Output of ``search_trending_repos()`` or multi-forge search.
         snapshots:         Loaded snapshot data from ``load_snapshots()``.
     """
     if not RICH_AVAILABLE:
@@ -177,6 +179,15 @@ def print_repo_table(repos_by_category: dict, snapshots: dict) -> None:
         return
 
     from github_repo_of_the_day import star_delta, daily_velocity
+    from forges.base import ForgeRepo as _ForgeRepo
+
+    # Forge color map
+    _forge_colors = {
+        "github": "bright_white",
+        "gitlab": "red",
+        "gitea": "green",
+        "bitbucket": "blue",
+    }
 
     for category, repos in repos_by_category.items():
         console.print(Rule(f"[bold magenta]{category.upper()}  ({len(repos)} results)[/bold magenta]"))
@@ -185,6 +196,9 @@ def print_repo_table(repos_by_category: dict, snapshots: dict) -> None:
         if not repos:
             console.print("  [dim](no results)[/dim]\n")
             continue
+
+        # Determine if we have multi-forge repos
+        has_forge = any(isinstance(r, _ForgeRepo) for r in repos)
 
         table = Table(
             box=box.ROUNDED,
@@ -195,6 +209,8 @@ def print_repo_table(repos_by_category: dict, snapshots: dict) -> None:
         )
 
         table.add_column("#",           style="dim",          width=3,  justify="right", no_wrap=True)
+        if has_forge:
+            table.add_column("Forge",      style="bold",        width=8,  no_wrap=True)
         table.add_column("Repository",  style="bold cyan",    min_width=24, no_wrap=False)
         table.add_column("Stars",        style="bright_white", width=9,  justify="right", no_wrap=True)
         table.add_column("Δ Stars",      width=18,             justify="right", no_wrap=True)
@@ -203,30 +219,55 @@ def print_repo_table(repos_by_category: dict, snapshots: dict) -> None:
         table.add_column("Description",  min_width=30,         no_wrap=False)
 
         for i, repo in enumerate(repos, start=1):
-            delta    = star_delta(repo, snapshots)
-            velocity = daily_velocity(repo, snapshots)
-            lang     = repo.get("language") or "N/A"
-            desc     = (repo.get("description") or "No description")[:120]
-            created  = repo["created_at"][:10]
-            updated  = repo["updated_at"][:10]
+            if isinstance(repo, _ForgeRepo):
+                # ForgeRepo object
+                delta    = star_delta(repo, snapshots)
+                velocity = daily_velocity(repo, snapshots)
+                lang     = repo.language or "N/A"
+                desc     = (repo.description or "No description")[:120]
+                created  = repo.created_at[:10]
+                updated  = repo.updated_at[:10]
+                forge    = repo.forge
+                full_name = repo.full_name
+                stars = repo.stars
+                forks = repo.forks
+                url = repo.url
+            else:
+                # Legacy dict
+                delta    = star_delta(repo, snapshots)
+                velocity = daily_velocity(repo, snapshots)
+                lang     = repo.get("language") or "N/A"
+                desc     = (repo.get("description") or "No description")[:120]
+                created  = repo["created_at"][:10]
+                updated  = repo["updated_at"][:10]
+                forge    = None
+                full_name = repo["full_name"]
+                stars = repo["stargazers_count"]
+                forks = repo["forks_count"]
+                url = repo["html_url"]
 
             # Repository cell: name + URL + dates
             repo_text = Text()
-            repo_text.append(repo["full_name"], style="bold cyan link " + repo["html_url"])
+            repo_text.append(full_name, style="bold cyan link " + url)
             repo_text.append(f"\n{created} → {updated}", style="dim")
 
             # Language cell with colour
             lang_text = Text(lang, style=_language_style(lang))
 
-            table.add_row(
-                str(i),
+            row = [str(i)]
+            if has_forge:
+                forge_label = forge.upper() if forge else ""
+                forge_color = _forge_colors.get(forge, "white")
+                row.append(Text(forge_label, style=f"bold {forge_color}"))
+            row.extend([
                 repo_text,
-                f"{repo['stargazers_count']:,}",
+                f"{stars:,}",
                 _star_delta_text(delta, velocity),
-                f"{repo['forks_count']:,}",
+                f"{forks:,}",
                 lang_text,
                 desc,
-            )
+            ])
+            table.add_row(*row)
 
         console.print(table)
         console.print()
@@ -259,16 +300,33 @@ def print_developer_table(developers: list[dict]) -> None:
     Render trending developers as a Rich table.
 
     Columns:
-        #  |  Developer  |  Followers  |  Repos  |  Company  |  Location  |  Bio
+        #  |  Forge  |  Developer  |  Followers  |  Repos  |  Company  |  Location  |  Bio
+
+    Supports both legacy dict users and ForgeUser objects.
 
     Args:
-        developers: Output of ``search_trending_developers()``.
+        developers: Output of ``search_trending_developers()`` or multi-forge search.
     """
     if not RICH_AVAILABLE:
         from github_repo_of_the_day import format_developer
         for i, user in enumerate(developers, start=1):
-            print(format_developer(user, i))
+            if hasattr(user, "login"):
+                # ForgeUser object
+                from forges.base import ForgeUser
+                print(f"#{i}  [{user.forge.upper()}] {user.login}  ({user.name or user.login})")
+            else:
+                print(format_developer(user, i))
         return
+
+    from forges.base import ForgeUser as _ForgeUser
+
+    # Forge color map
+    _forge_colors = {
+        "github": "bright_white",
+        "gitlab": "red",
+        "gitea": "green",
+        "bitbucket": "blue",
+    }
 
     console.print(Rule("[bold magenta]TRENDING DEVELOPERS[/bold magenta]"))
     console.print()
@@ -276,6 +334,9 @@ def print_developer_table(developers: list[dict]) -> None:
     if not developers:
         console.print("  [dim](no results)[/dim]\n")
         return
+
+    # Determine if we have multi-forge users
+    has_forge = any(isinstance(u, _ForgeUser) for u in developers)
 
     table = Table(
         box=box.ROUNDED,
@@ -286,6 +347,8 @@ def print_developer_table(developers: list[dict]) -> None:
     )
 
     table.add_column("#",          style="dim",           width=3,  justify="right", no_wrap=True)
+    if has_forge:
+        table.add_column("Forge",     style="bold",        width=8,  no_wrap=True)
     table.add_column("Developer",  style="bold green",    min_width=20, no_wrap=False)
     table.add_column("Followers",  style="bright_white",  width=10, justify="right", no_wrap=True)
     table.add_column("Repos",      style="bright_white",  width=7,  justify="right", no_wrap=True)
@@ -294,12 +357,28 @@ def print_developer_table(developers: list[dict]) -> None:
     table.add_column("Bio",        min_width=30,          no_wrap=False)
 
     for i, user in enumerate(developers, start=1):
-        login    = user.get("login") or ""
-        name     = user.get("name") or ""
-        company  = (user.get("company") or "").strip().lstrip("@")
-        location = user.get("location") or "N/A"
-        bio      = (user.get("bio") or "No bio")[:100]
-        url      = user.get("html_url") or ""
+        if isinstance(user, _ForgeUser):
+            # ForgeUser object
+            login    = user.login
+            name     = user.name or ""
+            company  = (user.company or "").strip().lstrip("@")
+            location = user.location or "N/A"
+            bio      = (user.bio or "No bio")[:100]
+            url      = user.url
+            forge    = user.forge
+            followers = user.followers
+            repos_count = user.public_repos
+        else:
+            # Legacy dict
+            login    = user.get("login") or ""
+            name     = user.get("name") or ""
+            company  = (user.get("company") or "").strip().lstrip("@")
+            location = user.get("location") or "N/A"
+            bio      = (user.get("bio") or "No bio")[:100]
+            url      = user.get("html_url") or ""
+            forge    = None
+            followers = user.get("followers", 0)
+            repos_count = user.get("public_repos", 0)
 
         # Developer cell: login + real name + URL
         dev_text = Text()
@@ -307,15 +386,20 @@ def print_developer_table(developers: list[dict]) -> None:
         if name:
             dev_text.append(f"  {name}", style="dim")
 
-        table.add_row(
-            str(i),
+        row = [str(i)]
+        if has_forge:
+            forge_label = forge.upper() if forge else ""
+            forge_color = _forge_colors.get(forge, "white")
+            row.append(Text(forge_label, style=f"bold {forge_color}"))
+        row.extend([
             dev_text,
-            f"{user.get('followers', 0):,}",
-            f"{user.get('public_repos', 0):,}",
+            f"{followers:,}",
+            f"{repos_count:,}",
             company or "—",
             location,
             bio,
-        )
+        ])
+        table.add_row(*row)
 
     console.print(table)
     console.print()

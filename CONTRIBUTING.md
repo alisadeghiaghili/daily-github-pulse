@@ -94,12 +94,26 @@ All 136 tests must pass before opening a PR. The CI matrix runs on Python 3.9–
 
 ```
 daily-github-pulse/
-├── github_repo_of_the_day.py   # All source code (single-file project)
+├── daily_github_pulse.py          # Main entry point (multi-forge)
+├── github_repo_of_the_day.py     # Legacy entry point (backward compat)
+├── forges/
+│   ├── __init__.py               # Forge registry + factory
+│   ├── base.py                   # ForgeClient ABC + dataclasses
+│   ├── github.py                 # GitHub implementation
+│   ├── gitlab.py                 # GitLab implementation
+│   ├── gitea.py                  # Gitea/Codeberg implementation
+│   └── bitbucket.py              # Bitbucket implementation
+├── rich_display.py               # Rich terminal output
 ├── tests/
-│   └── test_github_repo.py     # Full test suite (pytest)
+│   ├── test_github.py            # GitHub forge tests
+│   ├── test_gitlab.py            # GitLab forge tests
+│   ├── test_gitea.py             # Gitea forge tests
+│   ├── test_bitbucket.py         # Bitbucket forge tests
+│   ├── test_github_repo.py       # Legacy module tests
+│   └── test_rich_display.py      # Rich display tests
 ├── .github/
 │   └── workflows/
-│       └── tests.yml           # CI workflow (runs on push + PR to main)
+│       └── tests.yml             # CI workflow
 ├── requirements.txt
 ├── .env.example
 ├── CHANGELOG.md
@@ -107,8 +121,10 @@ daily-github-pulse/
 └── README.md
 ```
 
-This is intentionally a **single-file project**. All logic lives in `github_repo_of_the_day.py`.  
-If you think the code needs splitting into modules, open an issue for discussion first.
+The project uses a **forge abstraction layer** (`forges/`) that provides a unified
+interface for interacting with GitHub, GitLab, Gitea/Codeberg, and Bitbucket.
+Each forge implements the `ForgeClient` ABC with methods for searching repos
+and developers.
 
 ---
 

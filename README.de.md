@@ -1,6 +1,6 @@
 # daily-github-pulse
 
-> Jeden Tag wissen, was auf GitHub gerade durch die Decke geht.
+> Jeden Tag wissen, was auf GitHub, GitLab, Gitea und Bitbucket gerade durch die Decke geht.
 
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://python.org)
 [![Tests](https://github.com/alisadeghiaghili/daily-github-pulse/actions/workflows/tests.yml/badge.svg)](https://github.com/alisadeghiaghili/daily-github-pulse/actions)
@@ -11,12 +11,13 @@
 
 ---
 
-GitHub bekommt täglich tausende neue Repositories. Jene zu finden, die **wirklich** gerade an Fahrt gewinnen — nicht nur Repos mit einer hohen historischen Sternanzahl — kostet viel Zeit.
-
-`daily-github-pulse` macht daraus einen einzigen Befehl:
+`daily-github-pulse` macht Trending-Entdeckung zu einem einzigen Befehl:
 
 ```bash
-python github_repo_of_the_day.py
+python daily_github_pulse.py                           # GitHub (Standard)
+python daily_github_pulse.py --forge gitlab            # GitLab
+python daily_github_pulse.py --forge gitea --gitea-url https://codeberg.org
+python daily_github_pulse.py --forge github,gitlab     # Beide zusammengeführt
 ```
 
 Das Ergebnis: Repositories, die **heute** die meisten Sterne gesammelt haben, zusammen mit der echten täglichen Wachstumsrate — nicht nur die Gesamtanzahl.
@@ -228,6 +229,8 @@ Token erstellen → [github.com/settings/tokens](https://github.com/settings/tok
 
 | Kategorie | Flag | Beschreibung |
 |---|---|---|
+| Forge | `--forge NAME[,NAME...]` | Zu durchsuchende Plattform: `github` (Standard), `gitlab`, `gitea`, `bitbucket` |
+| Forge | `--gitea-url URL` | Gitea/Codeberg Instanz-URL |
 | Modus | `--developers` | Trendige Entwickler statt Repos anzeigen |
 | Filter | `-l LANG` | Programmiersprache (z.B. `python`, `go`, `rust`) |
 | Filter | `-p PERIOD` | Zeitfenster: `day` / `week` / `month` |
@@ -278,7 +281,7 @@ pip install pytest
 pytest tests/ -v
 ```
 
-136 Tests — kein Internetzugang erforderlich (GitHub API vollständig gemockt).
+221 Tests — kein Internetzugang erforderlich (alle APIs vollständig gemockt).
 
 ---
 

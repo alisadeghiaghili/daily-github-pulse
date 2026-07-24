@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-daily-github-pulse  v2.3.0
-Discover GitHub's top trending repositories and developers of the day —
+daily-github-pulse  v3.0.0
+Discover GitHub's top trending repositories and developers —
 with real star velocity, boolean keyword search, wildcard expansion,
 and AI relevance filtering.
+
+NOTE: This is the legacy entry point for backward compatibility.
+For multi-forge support (GitHub, GitLab, Gitea/Codeberg, Bitbucket),
+use daily_github_pulse.py instead.
 ──────────────────────────────────────────────────────────────────────
 Run it once. See what's blowing up on GitHub right now.
 
@@ -143,18 +147,20 @@ try:
         print_header,
         print_repo_table,
         print_developer_table,
+        make_ai_filter_progress,
         RICH_AVAILABLE,
     )
 except ImportError:
     RICH_AVAILABLE = False
-    print_header = None          # type: ignore[assignment]
-    print_repo_table = None      # type: ignore[assignment]
-    print_developer_table = None # type: ignore[assignment]
+    print_header = None              # type: ignore[assignment]
+    print_repo_table = None          # type: ignore[assignment]
+    print_developer_table = None     # type: ignore[assignment]
+    make_ai_filter_progress = None   # type: ignore[assignment]
 
 # ──────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────
-VERSION = "2.3.0"
+VERSION = "3.0.0"
 SNAPSHOT_DIR = Path.home() / ".daily-github-pulse"
 SNAPSHOT_FILE = SNAPSHOT_DIR / "snapshots.json"
 
@@ -243,7 +249,7 @@ class BoolNode:
         BoolNode(op='AND', children=[Term(value='LLM', negated=False), ...])
     """
     op: str
-    children: list = field(default_factory=list)
+    children: list[Union["Term", "BoolNode"]] = field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -768,15 +774,26 @@ def save_snapshots(repos_by_category: dict) -> None:
     Persist current star counts to disk, merging with existing data.
 
     Args:
-        repos_by_category: output of search_trending_repos().
+        repos_by_category: output of search_trending_repos() or multi-forge search.
+                           Can contain dicts or ForgeRepo objects.
     """
+    from forges.base import ForgeRepo
+
     existing = load_snapshots()
     now = datetime.now(timezone.utc).isoformat()
 
     for repos in repos_by_category.values():
         for repo in repos:
-            existing[repo["full_name"]] = {
-                "stars": repo["stargazers_count"],
+            if isinstance(repo, ForgeRepo):
+                name = f"{repo.forge}:{repo.full_name}"
+                stars = repo.stars
+            elif isinstance(repo, dict):
+                name = repo["full_name"]
+                stars = repo["stargazers_count"]
+            else:
+                continue
+            existing[name] = {
+                "stars": stars,
                 "saved_at": now,
             }
 
@@ -791,7 +808,7 @@ def star_delta(repo: dict, snapshots: dict) -> int | None:
     Calculate stars gained since the last snapshot (raw, not time-normalised).
 
     Args:
-        repo:      repo dict from GitHub API.
+        repo:      repo dict from GitHub API, or ForgeRepo object.
         snapshots: loaded snapshot data.
 
     Returns:
@@ -803,10 +820,21 @@ def star_delta(repo: dict, snapshots: dict) -> int | None:
         >>> star_delta(repo, snapshots)
         142
     """
-    prev = snapshots.get(repo["full_name"])
+    # Support both dict and ForgeRepo objects
+    from forges.base import ForgeRepo
+    if isinstance(repo, ForgeRepo):
+        name = f"{repo.forge}:{repo.full_name}"
+        stars = repo.stars
+    elif isinstance(repo, dict):
+        name = repo["full_name"]
+        stars = repo["stargazers_count"]
+    else:
+        return None
+
+    prev = snapshots.get(name)
     if prev is None:
         return None
-    return repo["stargazers_count"] - prev["stars"]
+    return stars - prev["stars"]
 
 
 def elapsed_days(snapshots: dict, full_name: str) -> float | None:
@@ -851,7 +879,7 @@ def daily_velocity(repo: dict, snapshots: dict) -> float | None:
     Compute the time-normalised star growth rate in stars per day.
 
     Args:
-        repo:      repo dict from GitHub API.
+        repo:      repo dict from GitHub API, or ForgeRepo object.
         snapshots: loaded snapshot data.
 
     Returns:
@@ -868,7 +896,17 @@ def daily_velocity(repo: dict, snapshots: dict) -> float | None:
     delta = star_delta(repo, snapshots)
     if delta is None:
         return None
-    days = elapsed_days(snapshots, repo["full_name"])
+
+    # Support both dict and ForgeRepo objects
+    from forges.base import ForgeRepo
+    if isinstance(repo, ForgeRepo):
+        name = f"{repo.forge}:{repo.full_name}"
+    elif isinstance(repo, dict):
+        name = repo["full_name"]
+    else:
+        return None
+
+    days = elapsed_days(snapshots, name)
     if days is None:
         return None
     return round(delta / days, 1)
@@ -1343,7 +1381,7 @@ def fetch_readme_snippet(full_name: str, max_chars: int = 800) -> str:
             return ""
         resp.raise_for_status()
         return resp.text[:max_chars]
-    except requests.RequestException:
+    except (requests.RequestException, UnicodeDecodeError):
         return ""
 
 
@@ -1523,33 +1561,62 @@ def apply_ai_filter(
             f"Invalid fallback '{fallback}'. Valid options: 'fail', 'passthrough'."
         )
 
+    # Count total repos for progress bar
+    total_repos = sum(len(repos) for repos in repos_by_category.values())
+
     filtered: dict = {}
 
-    for category, repos in repos_by_category.items():
-        kept: list[dict] = []
-        for repo in repos:
-            try:
-                relevant, reason = is_repo_relevant(repo, query, config)
-            except RuntimeError as exc:
-                if fallback == "passthrough":
+    # Use Rich progress bar if available, otherwise fall back to per-repo stderr
+    progress_ctx = make_ai_filter_progress() if (verbose and RICH_AVAILABLE and make_ai_filter_progress) else None
+
+    if progress_ctx is not None:
+        with progress_ctx as progress:
+            task = progress.add_task("AI filtering...", total=total_repos)
+            for category, repos in repos_by_category.items():
+                kept: list[dict] = []
+                for repo in repos:
+                    try:
+                        relevant, reason = is_repo_relevant(repo, query, config)
+                    except RuntimeError as exc:
+                        if fallback == "passthrough":
+                            print(
+                                f"  ⚠  LLM unavailable — showing all results unfiltered.\n"
+                                f"     ({exc})",
+                                file=sys.stderr,
+                            )
+                            return repos_by_category
+                        raise
+
+                    if relevant:
+                        kept.append(repo)
+                    progress.advance(task)
+                filtered[category] = kept
+    else:
+        for category, repos in repos_by_category.items():
+            kept: list[dict] = []
+            for repo in repos:
+                try:
+                    relevant, reason = is_repo_relevant(repo, query, config)
+                except RuntimeError as exc:
+                    if fallback == "passthrough":
+                        print(
+                            f"  ⚠  LLM unavailable — showing all results unfiltered.\n"
+                            f"     ({exc})",
+                            file=sys.stderr,
+                        )
+                        return repos_by_category
+                    raise
+
+                if verbose:
+                    mark = "✓" if relevant else "✗"
                     print(
-                        f"  ⚠  LLM unavailable — showing all results unfiltered.\n"
-                        f"     ({exc})",
+                        f"  {mark} {repo['full_name']}  — {reason}",
                         file=sys.stderr,
                     )
-                    return repos_by_category
-                raise
+                if relevant:
+                    kept.append(repo)
 
-            if verbose:
-                mark = "✓" if relevant else "✗"
-                print(
-                    f"  {mark} {repo['full_name']}  — {reason}",
-                    file=sys.stderr,
-                )
-            if relevant:
-                kept.append(repo)
-
-        filtered[category] = kept
+            filtered[category] = kept
 
     return filtered
 
@@ -1558,7 +1625,7 @@ def apply_ai_filter(
 # CLI helpers
 # ──────────────────────────────────────────────
 
-def _build_arg_parser():
+def _build_arg_parser() -> "argparse.ArgumentParser":
     """Build and return the CLI argument parser."""
     import argparse
 
@@ -1581,27 +1648,27 @@ def _build_arg_parser():
 
     # ── Time window ───────────────────────────────────────────────────────────
     parser.add_argument(
-        "--days", type=int, default=1, metavar="N",
+        "-d", "--days", type=int, default=1, metavar="N",
         help="Look-back window in days (default: 1).  Overridden by --period.",
     )
     parser.add_argument(
-        "--period", choices=list(PERIOD_DAYS), default=None,
+        "-p", "--period", choices=list(PERIOD_DAYS), default=None,
         help="Named look-back period: day, week, month.  Overrides --days.",
     )
 
     # ── Filters ───────────────────────────────────────────────────────────────
     parser.add_argument(
-        "--language", default=None, metavar="LANG",
+        "-l", "--language", default=None, metavar="LANG",
         help="Filter by programming language (e.g. python, rust, go).",
     )
     parser.add_argument(
-        "--top", type=int, default=10, metavar="N",
+        "-n", "--top", type=int, default=10, metavar="N",
         help="Number of results per category (default: 10).",
     )
 
     # ── Keyword search ────────────────────────────────────────────────────────
     parser.add_argument(
-        "--keyword", default=None, metavar="TERM",
+        "-k", "--keyword", default=None, metavar="TERM",
         help="Single keyword filter (legacy; use --keywords for multiple terms).",
     )
     parser.add_argument(
@@ -1672,12 +1739,27 @@ def _build_arg_parser():
 
     # ── Output ────────────────────────────────────────────────────────────────
     parser.add_argument(
-        "--output", choices=["text", "json", "csv"], default="text",
+        "-o", "--output", choices=["text", "json", "csv"], default="text",
         help="Output format (default: text).",
     )
     parser.add_argument(
-        "--output-file", default=None, metavar="PATH",
+        "-f", "--output-file", default=None, metavar="PATH",
         help="Write output to this file instead of stdout.",
+    )
+
+    # ── Snapshot ─────────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--no-snapshot", action="store_true",
+        help="Skip saving star counts for velocity tracking this run.",
+    )
+    parser.add_argument(
+        "--clear-snapshots", action="store_true",
+        help="Delete all stored snapshots and exit.",
+    )
+
+    # ── Version ──────────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {VERSION}",
     )
 
     return parser
@@ -1687,60 +1769,45 @@ def _build_arg_parser():
 # Entry point
 # ──────────────────────────────────────────────
 
-def main() -> None:
-    """Parse CLI arguments and run the requested search."""
-    global GITHUB_TOKEN  # noqa: PLW0603
-
-    parser = _build_arg_parser()
-    args = parser.parse_args()
-
-    # Token override
-    if args.token:
-        GITHUB_TOKEN = args.token
-
-    # Resolve look-back window
+def _run_developer_mode(args: object, since_days: int) -> None:
+    """Handle the --developers mode: search and render trending developers."""
+    if RICH_AVAILABLE and print_header:
+        print_header(since_days, mode="developers")
+    else:
+        print(
+            f"\n🔍  Trending Developers  "
+            f"(last {since_days} day{'s' if since_days != 1 else ''})\n",
+            file=sys.stderr,
+        )
     try:
-        since_days = resolve_period(args.period, args.days)
-    except ValueError as exc:
-        parser.error(str(exc))
+        developers = search_trending_developers(
+            language=args.language,
+            since_days=since_days,
+            top_n=args.top,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Error fetching developers: {exc}", file=sys.stderr)
+        sys.exit(1)
 
-    # ── Developer mode ────────────────────────────────────────────────────────
-    if args.developers:
-        if RICH_AVAILABLE and print_header:
-            print_header(since_days, mode="developers")
+    if args.output == "text":
+        if RICH_AVAILABLE and print_developer_table:
+            print_developer_table(developers)
         else:
-            print(
-                f"\n🔍  Trending Developers  "
-                f"(last {since_days} day{'s' if since_days != 1 else ''})\n",
-                file=sys.stderr,
-            )
-        try:
-            developers = search_trending_developers(
-                language=args.language,
-                since_days=since_days,
-                top_n=args.top,
-            )
-        except Exception as exc:  # noqa: BLE001
-            print(f"Error fetching developers: {exc}", file=sys.stderr)
-            sys.exit(1)
-
-        if args.output == "text":
-            if RICH_AVAILABLE and print_developer_table:
-                print_developer_table(developers)
-            else:
-                for i, user in enumerate(developers, start=1):
-                    print(format_developer(user, i))
+            for i, user in enumerate(developers, start=1):
+                print(format_developer(user, i))
+    else:
+        rows = [build_dev_export_row(u, i) for i, u in enumerate(developers, start=1)]
+        if args.output == "json":
+            write_output(export_json(rows), args.output_file, "json")
         else:
-            rows = [build_dev_export_row(u, i) for i, u in enumerate(developers, start=1)]
-            if args.output == "json":
-                write_output(export_json(rows), args.output_file, "json")
-            else:
-                write_output(
-                    export_csv(rows, DEV_EXPORT_FIELDS), args.output_file, "csv"
-                )
-        return
+            write_output(
+                export_csv(rows, DEV_EXPORT_FIELDS), args.output_file, "csv"
+            )
 
-    # ── Boolean query parse ───────────────────────────────────────────────────
+
+def _run_repo_mode(args: object, since_days: int, parser: object) -> None:
+    """Handle the repository mode: search, AI filter, render, and save snapshots."""
+    # Boolean query parse
     bool_query_ast = None
     if args.bool_query:
         try:
@@ -1748,12 +1815,12 @@ def main() -> None:
         except ValueError as exc:
             parser.error(str(exc))
 
-    # ── Wildcard expansion ────────────────────────────────────────────────────
+    # Wildcard expansion
     effective_keywords = args.keywords
     if args.wildcard and effective_keywords:
         effective_keywords = apply_wildcards_to_keywords(effective_keywords)
 
-    # ── Repository search ─────────────────────────────────────────────────────
+    # Repository search
     if RICH_AVAILABLE and print_header:
         print_header(since_days, mode="repos")
     else:
@@ -1780,7 +1847,7 @@ def main() -> None:
         print(f"Error fetching repositories: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    # ── AI filter ─────────────────────────────────────────────────────────────
+    # AI filter
     if args.ai_filter:
         ai_query = args.ai_filter_query
         if not ai_query:
@@ -1819,10 +1886,10 @@ def main() -> None:
                 print(f"AI filter error: {exc}", file=sys.stderr)
                 sys.exit(1)
 
-    # ── Load snapshots for velocity ───────────────────────────────────────────
+    # Load snapshots for velocity
     snapshots = load_snapshots()
 
-    # ── Render output ─────────────────────────────────────────────────────────
+    # Render output
     if args.output == "text":
         if RICH_AVAILABLE and print_repo_table:
             print_repo_table(repos_by_category, snapshots)
@@ -1847,11 +1914,45 @@ def main() -> None:
         else:
             write_output(export_csv(all_rows, EXPORT_FIELDS), args.output_file, "csv")
 
-    # ── Persist snapshots ─────────────────────────────────────────────────────
+    # Persist snapshots
+    if not getattr(args, "no_snapshot", False):
+        try:
+            save_snapshots(repos_by_category)
+        except OSError as exc:
+            print(f"  ⚠  Could not save snapshots: {exc}", file=sys.stderr)
+
+
+def main() -> None:
+    """Parse CLI arguments and run the requested search."""
+    global GITHUB_TOKEN  # noqa: PLW0603
+
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+
+    # Clear snapshots and exit
+    if args.clear_snapshots:
+        if SNAPSHOT_FILE.exists():
+            SNAPSHOT_FILE.unlink()
+            print("  ✓  Snapshots cleared.", file=sys.stderr)
+        else:
+            print("  (no snapshots to clear)", file=sys.stderr)
+        return
+
+    # Token override
+    if args.token:
+        GITHUB_TOKEN = args.token
+
+    # Resolve look-back window
     try:
-        save_snapshots(repos_by_category)
-    except OSError as exc:
-        print(f"  ⚠  Could not save snapshots: {exc}", file=sys.stderr)
+        since_days = resolve_period(args.period, args.days)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    # Dispatch to the appropriate mode
+    if args.developers:
+        _run_developer_mode(args, since_days)
+    else:
+        _run_repo_mode(args, since_days, parser)
 
 
 if __name__ == "__main__":

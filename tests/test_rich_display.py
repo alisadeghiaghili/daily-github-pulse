@@ -38,14 +38,14 @@ def _capture_console(func, *args, **kwargs) -> str:
     """Run func with a fresh in-memory Console and return captured text."""
     from rich.console import Console
     buf = io.StringIO()
-    con = Console(file=buf, highlight=False, no_color=True)
+    con = Console(file=buf, highlight=False, no_color=True, width=200)
     # Temporarily replace the module-level console
-    original = rd._console
-    rd._console = con
+    original = rd.console
+    rd.console = con
     try:
         func(*args, **kwargs)
     finally:
-        rd._console = original
+        rd.console = original
     return buf.getvalue()
 
 

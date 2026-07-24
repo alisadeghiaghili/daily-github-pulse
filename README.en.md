@@ -11,12 +11,15 @@
 
 ---
 
-GitHub gets thousands of new repositories every day. Finding the ones that are **actually** gaining momentum right now — not just repos with a high historical star count — takes real effort.
+Find out what's blowing up across **GitHub, GitLab, Gitea/Codeberg, and Bitbucket** — every single day.
 
-`daily-github-pulse` turns that into a single command:
+`daily-github-pulse` turns trending discovery into a single command:
 
 ```bash
-python github_repo_of_the_day.py
+python daily_github_pulse.py                           # GitHub (default)
+python daily_github_pulse.py --forge gitlab            # GitLab
+python daily_github_pulse.py --forge gitea --gitea-url https://codeberg.org
+python daily_github_pulse.py --forge github,gitlab     # Merged from both
 ```
 
 You get a ranked list of repositories that gained the most stars **today**, along with a real daily growth rate — not just a total star count.
@@ -252,6 +255,8 @@ Get a token → [github.com/settings/tokens](https://github.com/settings/tokens)
 
 | Category | Flag | Description |
 |---|---|---|
+| Forge | `--forge NAME[,NAME...]` | Forge(s) to search: `github` (default), `gitlab`, `gitea`, `bitbucket` |
+| Forge | `--gitea-url URL` | Gitea/Codeberg instance URL (default: `https://gitea.com`) |
 | Mode | `--developers` | Show trending developers instead of repos |
 | Filter | `-l LANG` | Programming language (e.g. `python`, `go`, `rust`) |
 | Filter | `-p PERIOD` | Time window: `day` / `week` / `month` |
@@ -302,12 +307,16 @@ pip install pytest
 pytest tests/ -v
 ```
 
-**176 tests** — no network access required (GitHub API is fully mocked).
+**221 tests** — no network access required (all APIs fully mocked).
 
 | Test file | Coverage |
 |---|---|
 | `tests/test_github_repo.py` | All core functions, search, boolean parser, wildcard, snapshots |
 | `tests/test_rich_display.py` | All `rich_display.py` public functions, rich + fallback paths |
+| `tests/test_github.py` | GitHub forge client |
+| `tests/test_gitlab.py` | GitLab forge client |
+| `tests/test_gitea.py` | Gitea/Codeberg forge client |
+| `tests/test_bitbucket.py` | Bitbucket forge client |
 
 ---
 

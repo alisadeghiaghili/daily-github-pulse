@@ -20,5 +20,17 @@ rich>=13.7.0
 # Required only when AI_PROVIDER=anthropic in .env.
 # anthropic>=0.25.0
 
+# ─── Multi-forge support ────────────────────────────────────────────────────
+# All forge clients use the `requests` library (already included above).
+# No additional packages required for GitLab, Gitea/Codeberg, or Bitbucket.
+#
+# Set environment variables for each forge you want to use:
+#   GITHUB_TOKEN=ghp_...        (GitHub)
+#   GITLAB_TOKEN=glpat-...      (GitLab)
+#   GITEA_TOKEN=...             (Gitea/Codeberg)
+#   BITBUCKET_USER=xxx          (Bitbucket - username)
+#   BITBUCKET_APP_PASSWORD=xxx  (Bitbucket - app password)
+
 # ─── Development / testing ────────────────────────────────────────────────────
 # pytest>=8.0.0
+# pytest-cov>=5.0.0
