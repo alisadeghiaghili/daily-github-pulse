@@ -1190,14 +1190,27 @@ def export_csv(rows: list[dict], fieldnames: list[str]) -> str:
     Serialise export rows to a CSV string (utf-8-sig for Excel compat).
 
     ``None`` values are written as empty strings.
+    Protects against CSV injection (formula injection).
     """
     buf = io.StringIO()
     writer = csv.DictWriter(
         buf, fieldnames=fieldnames, lineterminator="\n", extrasaction="ignore"
     )
     writer.writeheader()
+
+    # Characters that trigger formula execution in Excel/Sheets
+    dangerous_chars = ("=", "+", "-", "@", "\t", "\r")
+
     for row in rows:
-        writer.writerow({k: ("" if v is None else v) for k, v in row.items()})
+        safe_row = {}
+        for k, v in row.items():
+            if v is None:
+                safe_row[k] = ""
+            elif isinstance(v, str) and v.startswith(dangerous_chars):
+                safe_row[k] = f"'{v}"
+            else:
+                safe_row[k] = v
+        writer.writerow(safe_row)
     return buf.getvalue()
 
 
