@@ -6,6 +6,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+### Removed
+- Removed `--token`, `--gitlab-token`, and `--gitea-token` CLI flags to prevent process listing leaks. Tokens must now be provided via environment variables or `.env` files.
+
 ## [3.0.0] — 2026-07-24
 
 ### Added

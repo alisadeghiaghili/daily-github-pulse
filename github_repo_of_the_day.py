@@ -1740,16 +1740,6 @@ def _build_arg_parser() -> "argparse.ArgumentParser":
         ),
     )
 
-    # ── GitHub token ──────────────────────────────────────────────────────────
-    parser.add_argument(
-        "--token", default=None, metavar="TOKEN",
-        help=(
-            "GitHub personal access token.  "
-            "Overrides GITHUB_TOKEN env var.  "
-            "Raises rate limit from 60 to 5,000 req/hr."
-        ),
-    )
-
     # ── Output ────────────────────────────────────────────────────────────────
     parser.add_argument(
         "-o", "--output", choices=["text", "json", "csv"], default="text",
@@ -1950,10 +1940,6 @@ def main() -> None:
         else:
             print("  (no snapshots to clear)", file=sys.stderr)
         return
-
-    # Token override
-    if args.token:
-        GITHUB_TOKEN = args.token
 
     # Resolve look-back window
     try:
