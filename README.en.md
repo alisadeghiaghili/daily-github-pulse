@@ -275,7 +275,6 @@ Get a token → [github.com/settings/tokens](https://github.com/settings/tokens)
 | AI | `--ai-filter` | Enable LLM relevance filter |
 | AI | `--ai-filter-query "QUERY"` | Natural-language description of your intent |
 | AI | `--ai-filter-fallback` | `fail` or `passthrough` |
-| Auth | `--token TOKEN` | GitHub token (overrides `.env`) |
 
 </details>
 
