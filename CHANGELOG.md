@@ -157,7 +157,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - `--top` / `-n` result count per category
 - `--output` formats: `text` (default), `json`, `csv`
 - `--output-file` to write exports to disk
-- `--token` CLI override for GitHub PAT
 - `.env` support via `python-dotenv`
 - Snapshot-based star delta tracking (`~/.daily-github-pulse/snapshots.json`)
 - Trending developers mode (`--developers`)
