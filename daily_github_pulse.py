@@ -108,6 +108,8 @@ try:
         load_ai_filter_config,
         apply_ai_filter,
     )
+
+    VERSION = _LEGACY_VERSION
 except ImportError:
     # Fallback: define minimal versions if legacy module unavailable
     VERSION = "3.0.0"
@@ -471,23 +473,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    # ── Auth tokens ─────────────────────────────────────────────────────────
-    parser.add_argument(
-        "--token", default=None, metavar="TOKEN",
-        help=(
-            "Primary forge token (GitHub by default).  "
-            "Overrides GITHUB_TOKEN env var."
-        ),
-    )
-    parser.add_argument(
-        "--gitlab-token", default=None, metavar="TOKEN",
-        help="GitLab personal access token.  Overrides GITLAB_TOKEN env var.",
-    )
-    parser.add_argument(
-        "--gitea-token", default=None, metavar="TOKEN",
-        help="Gitea/Codeberg API token.  Overrides GITEA_TOKEN env var.",
-    )
-
     # ── Output ──────────────────────────────────────────────────────────────
     parser.add_argument(
         "-o", "--output", choices=["text", "json", "csv"], default="text",
@@ -544,14 +529,6 @@ def main() -> None:
     forge_names = [f.strip().lower() for f in args.forge.split(",") if f.strip()]
     if not forge_names:
         parser.error("--forge requires at least one forge name.")
-
-    # Set token overrides
-    if args.token and "github" in forge_names:
-        os.environ["GITHUB_TOKEN"] = args.token
-    if args.gitlab_token:
-        os.environ["GITLAB_TOKEN"] = args.gitlab_token
-    if args.gitea_token:
-        os.environ["GITEA_TOKEN"] = args.gitea_token
 
     # ── Developer mode ──────────────────────────────────────────────────────
     if args.developers:

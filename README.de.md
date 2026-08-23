@@ -249,7 +249,6 @@ Token erstellen → [github.com/settings/tokens](https://github.com/settings/tok
 | KI | `--ai-filter` | LLM-Relevanzfilter aktivieren |
 | KI | `--ai-filter-query "QUERY"` | Absicht in natürlicher Sprache |
 | KI | `--ai-filter-fallback` | `fail` oder `passthrough` |
-| Auth | `--token TOKEN` | GitHub-Token (überschreibt `.env`) |
 
 </details>
 
