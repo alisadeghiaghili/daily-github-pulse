@@ -1474,7 +1474,10 @@ def _call_anthropic(
             "Install it with: pip install anthropic"
         ) from exc
 
-    client = _anthropic.Anthropic(api_key=config.api_key)
+    client = _anthropic.Anthropic(
+        api_key=config.api_key,
+        timeout=config.timeout,
+    )
     msg = client.messages.create(
         model=config.model,
         max_tokens=config.max_tokens,
