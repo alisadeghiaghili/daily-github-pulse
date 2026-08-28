@@ -203,8 +203,6 @@ class GiteaClient(ForgeClient):
                     futures = [executor.submit(_fetch_ext, ext) for ext in extensions]
 
                     # We can use as_completed to get the first one that returns 200
-                    # Wait, as_completed yields futures as they complete.
-                    # If multiple complete at similar times, it's fine.
                     for future in concurrent.futures.as_completed(futures):
                         res = future.result()
                         if res is not None:
