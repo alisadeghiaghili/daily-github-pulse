@@ -106,3 +106,85 @@ class TestGiteaClient:
         assert len(users) == 1
         assert isinstance(users[0], ForgeUser)
         assert users[0].forge == "gitea"
+
+    @patch("forges.gitea.requests.get")
+    def test_fetch_readme_extensions_priority(self, mock_get, client):
+        # Simulate that "README" does not exist (404),
+        # but BOTH README.md and README.txt exist.
+        # It must return README.md because of the fixed order of extensions.
+        def mock_get_impl(url, *args, **kwargs):
+            mock_resp = MagicMock()
+            if url.endswith("/README"):
+                mock_resp.status_code = 404
+            elif url.endswith("/README.md"):
+                mock_resp.status_code = 200
+                mock_resp.text = "md contents"
+            elif url.endswith("/README.txt"):
+                mock_resp.status_code = 200
+                mock_resp.text = "txt contents"
+            else:
+                mock_resp.status_code = 404
+            return mock_resp
+
+        mock_get.side_effect = mock_get_impl
+
+        result = client.fetch_readme("owner/repo")
+        assert result == "md contents"
+
+    @patch("forges.gitea.requests.get")
+    def test_fetch_readme_all_404(self, mock_get, client):
+        # If all extensions are 404, it should return ""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_get.return_value = mock_resp
+
+        result = client.fetch_readme("owner/repo")
+        assert result == ""
+
+    @patch("forges.gitea.requests.get")
+    def test_fetch_readme_request_exception(self, mock_get, client):
+        import requests
+
+        mock_get.side_effect = requests.RequestException("Connection error")
+
+        result = client.fetch_readme("owner/repo")
+        assert result == ""
+
+    @patch("forges.gitea.requests.get")
+    def test_fetch_readme_fast_completion(self, mock_get, client):
+        # Test that we don't block indefinitely on a slow request if a faster one
+        # (with higher or equal priority) completes.
+        import time
+
+        # Test timeline:
+        # README: 404
+        # md: fast 200
+        # MD, rst, txt: slow 200 (or timeout)
+        # Should return quickly with 'md' result.
+
+        def mock_get_impl(url, *args, **kwargs):
+            if url.endswith("/README"):
+                resp = MagicMock()
+                resp.status_code = 404
+                return resp
+            elif url.endswith("/README.md"):
+                time.sleep(0.01)  # Fast
+                resp = MagicMock()
+                resp.status_code = 200
+                resp.text = "md content"
+                return resp
+            else:
+                time.sleep(2)  # Very slow
+                resp = MagicMock()
+                resp.status_code = 200
+                resp.text = "other content"
+                return resp
+
+        mock_get.side_effect = mock_get_impl
+
+        start = time.time()
+        result = client.fetch_readme("owner/repo")
+        duration = time.time() - start
+
+        assert result == "md content"
+        assert duration < 1.0  # Should not have waited for the 2-second requests

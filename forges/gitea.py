@@ -196,22 +196,26 @@ class GiteaClient(ForgeClient):
                         pass
                     return None
 
-                with concurrent.futures.ThreadPoolExecutor(
+                # Use a ThreadPoolExecutor but do not use the 'with' context manager
+                # because the context manager calls shutdown(wait=True) on exit,
+                # which blocks until all running futures finish.
+                # We want to return as soon as we find a match and abandon the rest.
+                executor = concurrent.futures.ThreadPoolExecutor(
                     max_workers=len(extensions)
-                ) as executor:
-                    # Submit all fallback requests
-                    futures = [executor.submit(_fetch_ext, ext) for ext in extensions]
+                )
 
-                    # We can use as_completed to get the first one that returns 200
-                    for future in concurrent.futures.as_completed(futures):
-                        res = future.result()
-                        if res is not None:
-                            # A successful 200 response was found
-                            # Cancel remaining futures if possible (Python 3.9+)
-                            for f in futures:
-                                f.cancel()
-                            resp = res
-                            break
+                # Submit all fallback requests in order
+                futures = [executor.submit(_fetch_ext, ext) for ext in extensions]
+
+                # Check results in the exact priority order
+                for future in futures:
+                    res = future.result()
+                    if res is not None:
+                        resp = res
+                        break
+
+                # Shutdown executor without waiting for remaining threads to finish
+                executor.shutdown(wait=False)
 
             if resp.status_code != 200:
                 return ""
