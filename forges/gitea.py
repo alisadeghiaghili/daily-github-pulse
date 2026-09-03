@@ -9,9 +9,12 @@ Implements the ForgeClient interface for Gitea-compatible APIs
 from __future__ import annotations
 
 import os
-from datetime import date, timedelta, timezone
+from datetime import date, timedelta
+
 
 import requests
+import concurrent.futures
+
 
 from .base import ForgeClient, ForgeRepo, ForgeUser
 from . import register_forge
@@ -91,7 +94,7 @@ class GiteaClient(ForgeClient):
         new_repos = []
         active_repos = []
 
-        for r in repos_data[:top_n * 2]:
+        for r in repos_data[: top_n * 2]:
             repo = ForgeRepo(
                 forge="gitea",
                 id=str(r.get("id", "")),
@@ -151,18 +154,20 @@ class GiteaClient(ForgeClient):
 
         users = []
         for u in users_data[:top_n]:
-            users.append(ForgeUser(
-                forge="gitea",
-                login=u.get("login", ""),
-                name=u.get("full_name") or u.get("name"),
-                company=u.get("organization"),
-                location=u.get("location"),
-                bio=u.get("description"),
-                public_repos=u.get("repos_count", 0),
-                followers=u.get("followers_count", 0),
-                following=u.get("following_count", 0),
-                url=u.get("html_url", ""),
-            ))
+            users.append(
+                ForgeUser(
+                    forge="gitea",
+                    login=u.get("login", ""),
+                    name=u.get("full_name") or u.get("name"),
+                    company=u.get("organization"),
+                    location=u.get("location"),
+                    bio=u.get("description"),
+                    public_repos=u.get("repos_count", 0),
+                    followers=u.get("followers_count", 0),
+                    following=u.get("following_count", 0),
+                    url=u.get("html_url", ""),
+                )
+            )
 
         return users
 
@@ -175,15 +180,43 @@ class GiteaClient(ForgeClient):
                 timeout=10,
             )
             if resp.status_code == 404:
-                # Try common README extensions
-                for ext in ["md", "MD", "rst", "txt"]:
-                    resp = requests.get(
-                        f"{self.base_url}/repos/{full_name}/raw/README.{ext}",
-                        headers=self._get_headers(),
-                        timeout=10,
-                    )
-                    if resp.status_code == 200:
+                # Try common README extensions concurrently
+                extensions = ["md", "MD", "rst", "txt"]
+
+                def _fetch_ext(ext):
+                    try:
+                        r = requests.get(
+                            f"{self.base_url}/repos/{full_name}" f"/raw/README.{ext}",
+                            headers=self._get_headers(),
+                            timeout=10,
+                        )
+                        if r.status_code == 200:
+                            return r
+                    except requests.RequestException:
+                        pass
+                    return None
+
+                # Use a ThreadPoolExecutor but do not use the 'with' context manager
+                # because the context manager calls shutdown(wait=True) on exit,
+                # which blocks until all running futures finish.
+                # We want to return as soon as we find a match and abandon the rest.
+                executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=len(extensions)
+                )
+
+                # Submit all fallback requests in order
+                futures = [executor.submit(_fetch_ext, ext) for ext in extensions]
+
+                # Check results in the exact priority order
+                for future in futures:
+                    res = future.result()
+                    if res is not None:
+                        resp = res
                         break
+
+                # Shutdown executor without waiting for remaining threads to finish
+                executor.shutdown(wait=False)
+
             if resp.status_code != 200:
                 return ""
             return resp.text[:max_chars]
