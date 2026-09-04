@@ -18,7 +18,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   - `forges/bitbucket.py` — Bitbucket REST API v2.0 client
 - **`--forge` CLI flag** — specify forge(s) to search, comma-separated for multi-forge
 - **`--gitea-url` CLI flag** — custom Gitea instance URL (e.g. Codeberg)
-- **`--gitlab-token` / `--gitea-token` CLI flags** — per-forge auth tokens
 - **Multi-forge parallel search** — searches multiple forges concurrently via `ThreadPoolExecutor`
 - **Merged & ranked output** — multi-forge results sorted by stars with visible forge labels
 - **Forge column in exports** — JSON/CSV exports now include a `forge` field
@@ -157,7 +156,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - `--top` / `-n` result count per category
 - `--output` formats: `text` (default), `json`, `csv`
 - `--output-file` to write exports to disk
-- `--token` CLI override for GitHub PAT
 - `.env` support via `python-dotenv`
 - Snapshot-based star delta tracking (`~/.daily-github-pulse/snapshots.json`)
 - Trending developers mode (`--developers`)
