@@ -71,9 +71,8 @@ On the next run two velocity numbers are computed:
 
 Token priority
 ──────────────
-  1. --token CLI flag
-  2. GITHUB_TOKEN environment variable / .env file
-  3. Unauthenticated  →  60 req/hr limit
+  1. GITHUB_TOKEN environment variable / .env file
+  2. Unauthenticated  →  60 req/hr limit
 
 Keyword search modes
 ────────────────────
@@ -1746,12 +1745,7 @@ def _build_arg_parser() -> "argparse.ArgumentParser":
 
     # ── GitHub token ──────────────────────────────────────────────────────────
     parser.add_argument(
-        "--token", default=None, metavar="TOKEN",
-        help=(
-            "GitHub personal access token.  "
-            "Overrides GITHUB_TOKEN env var.  "
-            "Raises rate limit from 60 to 5,000 req/hr."
-        ),
+        "--token", default=None, metavar="TOKEN", help=argparse.SUPPRESS,
     )
 
     # ── Output ────────────────────────────────────────────────────────────────
@@ -1957,6 +1951,11 @@ def main() -> None:
 
     # Token override
     if args.token:
+        print(
+            "  ⚠  SECURITY WARNING: Using --token on the command line is insecure.\n"
+            "     Please use the GITHUB_TOKEN environment variable or .env file instead.",
+            file=sys.stderr,
+        )
         GITHUB_TOKEN = args.token
 
     # Resolve look-back window
