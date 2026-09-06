@@ -108,6 +108,7 @@ try:
         load_ai_filter_config,
         apply_ai_filter,
     )
+    VERSION = "3.0.0" # Use a defined version instead of the legacy one for this script
 except ImportError:
     # Fallback: define minimal versions if legacy module unavailable
     VERSION = "3.0.0"
@@ -474,18 +475,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     # ── Auth tokens ─────────────────────────────────────────────────────────
     parser.add_argument(
         "--token", default=None, metavar="TOKEN",
-        help=(
-            "Primary forge token (GitHub by default).  "
-            "Overrides GITHUB_TOKEN env var."
-        ),
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--gitlab-token", default=None, metavar="TOKEN",
-        help="GitLab personal access token.  Overrides GITLAB_TOKEN env var.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--gitea-token", default=None, metavar="TOKEN",
-        help="Gitea/Codeberg API token.  Overrides GITEA_TOKEN env var.",
+        help=argparse.SUPPRESS,
     )
 
     # ── Output ──────────────────────────────────────────────────────────────
@@ -546,11 +544,21 @@ def main() -> None:
         parser.error("--forge requires at least one forge name.")
 
     # Set token overrides
-    if args.token and "github" in forge_names:
-        os.environ["GITHUB_TOKEN"] = args.token
+    if args.token:
+        print("WARNING: The --token argument is deprecated and will be removed in a future version. "
+              "Passing tokens via command-line arguments is insecure. "
+              "Please use the GITHUB_TOKEN environment variable or .env file instead.", file=sys.stderr)
+        if "github" in forge_names:
+            os.environ["GITHUB_TOKEN"] = args.token
     if args.gitlab_token:
+        print("WARNING: The --gitlab-token argument is deprecated and will be removed in a future version. "
+              "Passing tokens via command-line arguments is insecure. "
+              "Please use the GITLAB_TOKEN environment variable or .env file instead.", file=sys.stderr)
         os.environ["GITLAB_TOKEN"] = args.gitlab_token
     if args.gitea_token:
+        print("WARNING: The --gitea-token argument is deprecated and will be removed in a future version. "
+              "Passing tokens via command-line arguments is insecure. "
+              "Please use the GITEA_TOKEN environment variable or .env file instead.", file=sys.stderr)
         os.environ["GITEA_TOKEN"] = args.gitea_token
 
     # ── Developer mode ──────────────────────────────────────────────────────
