@@ -1747,11 +1747,7 @@ def _build_arg_parser() -> "argparse.ArgumentParser":
     # ── GitHub token ──────────────────────────────────────────────────────────
     parser.add_argument(
         "--token", default=None, metavar="TOKEN",
-        help=(
-            "GitHub personal access token.  "
-            "Overrides GITHUB_TOKEN env var.  "
-            "Raises rate limit from 60 to 5,000 req/hr."
-        ),
+        help=argparse.SUPPRESS,
     )
 
     # ── Output ────────────────────────────────────────────────────────────────
@@ -1957,6 +1953,11 @@ def main() -> None:
 
     # Token override
     if args.token:
+        print(
+            "  ⚠  WARNING: Passing tokens via CLI arguments is deprecated for security reasons "
+            "(process listing leaks). Please use environment variables (e.g., GITHUB_TOKEN) or a .env file instead.",
+            file=sys.stderr,
+        )
         GITHUB_TOKEN = args.token
 
     # Resolve look-back window
