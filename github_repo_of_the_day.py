@@ -160,7 +160,7 @@ except ImportError:
 # ──────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────
-VERSION = "3.0.0"
+VERSION = "3.0.1"
 SNAPSHOT_DIR = Path.home() / ".daily-github-pulse"
 SNAPSHOT_FILE = SNAPSHOT_DIR / "snapshots.json"
 
@@ -1498,8 +1498,40 @@ _RELEVANCE_SYSTEM_PROMPT = (
 )
 
 
+def repo_identity(repo) -> tuple[str, str]:
+    """
+    Extract ``(full_name, description)`` from a repo payload.
+
+    Accepts either a raw GitHub-style dict or a :class:`~forges.base.ForgeRepo`.
+    Both shapes are produced by search paths in this project.
+
+    Args:
+        repo: Mapping with ``full_name`` / ``description``, or ``ForgeRepo``.
+
+    Returns:
+        ``(full_name, description)``. Description is an empty string when
+        missing or ``None``.
+
+    Raises:
+        ValueError: If the object exposes neither shape.
+
+    Examples:
+        >>> repo_identity({"full_name": "a/b", "description": "hi"})
+        ('a/b', 'hi')
+        >>> repo_identity({"full_name": "a/b"})
+        ('a/b', '')
+    """
+    from forges.base import ForgeRepo
+
+    if isinstance(repo, ForgeRepo):
+        return repo.full_name, (repo.description or "")
+    if isinstance(repo, dict):
+        return repo["full_name"], (repo.get("description") or "")
+    raise ValueError(f"Unsupported repo type for identity: {type(repo)!r}")
+
+
 def is_repo_relevant(
-    repo: dict,
+    repo,
     query: str,
     config: AIFilterConfig,
 ) -> tuple[bool, str]:
@@ -1510,7 +1542,7 @@ def is_repo_relevant(
     calls the appropriate LLM backend.
 
     Args:
-        repo:   Repository dict from GitHub API.
+        repo:   Repository dict from GitHub API, or ``ForgeRepo``.
         query:  Natural-language description of what the user is looking for.
         config: AIFilterConfig specifying the backend and credentials.
 
@@ -1519,12 +1551,13 @@ def is_repo_relevant(
         ``relevant`` is ``True`` when the LLM responds with ``YES``.
         ``reason`` is the LLM's brief explanation.
     """
-    description = (repo.get("description") or "").strip()
-    readme = fetch_readme_snippet(repo["full_name"])
+    full_name, description_raw = repo_identity(repo)
+    description = description_raw.strip()
+    readme = fetch_readme_snippet(full_name)
 
     user_message = (
         f"User intent: {query}\n\n"
-        f"Repository: {repo['full_name']}\n"
+        f"Repository: {full_name}\n"
         f"Description: {description or 'N/A'}\n"
         f"README snippet:\n{readme or 'N/A'}"
     )
@@ -1536,7 +1569,7 @@ def is_repo_relevant(
             raw = _call_openai_compatible(config, _RELEVANCE_SYSTEM_PROMPT, user_message)
     except Exception as exc:  # noqa: BLE001
         # Propagate so callers can apply fallback policy
-        raise RuntimeError(f"LLM call failed for {repo['full_name']}: {exc}") from exc
+        raise RuntimeError(f"LLM call failed for {full_name}: {exc}") from exc
 
     upper = raw.upper()
     relevant = upper.startswith("YES")
@@ -1626,8 +1659,9 @@ def apply_ai_filter(
 
                 if verbose:
                     mark = "✓" if relevant else "✗"
+                    full_name, _ = repo_identity(repo)
                     print(
-                        f"  {mark} {repo['full_name']}  — {reason}",
+                        f"  {mark} {full_name}  — {reason}",
                         file=sys.stderr,
                     )
                 if relevant:

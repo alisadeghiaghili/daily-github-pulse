@@ -307,7 +307,7 @@ pip install pytest
 pytest tests/ -v
 ```
 
-**221 tests** — no network access required (all APIs fully mocked).
+**234 tests** — no network access required (all APIs fully mocked).
 
 | Test file | Coverage |
 |---|---|
@@ -317,6 +317,7 @@ pytest tests/ -v
 | `tests/test_gitlab.py` | GitLab forge client |
 | `tests/test_gitea.py` | Gitea/Codeberg forge client |
 | `tests/test_bitbucket.py` | Bitbucket forge client |
+| `tests/test_stage0_stability.py` | Entry point VERSION, multi-forge velocity keys, AI filter adapters |
 
 ---
 

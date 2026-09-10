@@ -208,12 +208,14 @@ pip install pytest
 pytest tests/ -v
 ```
 
-**۱۷۶ تست**، بدون نیاز به اینترنت (GitHub API کاملاً mock شده).
+**بیش از ۲۲۰ تست**، بدون نیاز به اینترنت (API کاملاً mock شده).
 
 | فایل تست | پوشش |
 |---|---|
 | `tests/test_github_repo.py` | همه توابع اصلی، search، boolean، wildcard، snapshot |
 | `tests/test_rich_display.py` | همه توابع `rich_display.py`، rich و fallback paths |
+| `tests/test_github.py` / `test_gitlab.py` / `test_gitea.py` / `test_bitbucket.py` | کلاینت‌های forge |
+| `tests/test_stage0_stability.py` | entry point، velocity چندفورجی، AI filter adapter |
 
 ---
 

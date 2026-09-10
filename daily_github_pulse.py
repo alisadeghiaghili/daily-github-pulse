@@ -78,7 +78,7 @@ except ImportError:
 # ──────────────────────────────────────────────
 try:
     from github_repo_of_the_day import (
-        VERSION as _LEGACY_VERSION,
+        VERSION,
         PERIOD_DAYS,
         VALID_SEARCH_IN,
         VALID_KEYWORD_OPS,
@@ -109,8 +109,8 @@ try:
         apply_ai_filter,
     )
 except ImportError:
-    # Fallback: define minimal versions if legacy module unavailable
-    VERSION = "3.0.0"
+    # Fallback when the legacy module is unavailable (e.g. partial install).
+    VERSION = "3.0.1"
     PERIOD_DAYS = {"day": 1, "week": 7, "month": 30}
     VALID_SEARCH_IN = {"name", "description", "readme"}
     VALID_KEYWORD_OPS = {"AND", "OR"}
@@ -260,17 +260,21 @@ def search_multi_forge_developers(
 # ──────────────────────────────────────────────
 
 def format_forge_repo(repo: "ForgeRepo", rank: int, snapshots: dict) -> str:
-    """Format a ForgeRepo for plain-text display."""
-    from forges.base import ForgeRepo
+    """Format a ForgeRepo for plain-text display.
 
-    delta = star_delta(
-        {"stargazers_count": repo.stars, "full_name": repo.full_name},
-        snapshots,
-    )
-    velocity = daily_velocity(
-        {"stargazers_count": repo.stars, "full_name": repo.full_name},
-        snapshots,
-    )
+    Snapshot lookups use the ForgeRepo object so keys stay namespaced
+    as ``forge:full_name`` (the same shape ``save_snapshots`` writes).
+
+    Args:
+        repo:       Normalized repository from a forge client.
+        rank:       1-based display rank.
+        snapshots:  Snapshot mapping from ``load_snapshots()``.
+
+    Returns:
+        Multi-line plain-text block for one repository.
+    """
+    delta = star_delta(repo, snapshots)
+    velocity = daily_velocity(repo, snapshots)
     forge_label = f"[{repo.forge.upper()}]"
     desc = (repo.description or "No description")[:80]
     return (
@@ -303,17 +307,19 @@ def format_forge_user(user: "ForgeUser", rank: int) -> str:
 
 
 def build_forge_export_row(repo: "ForgeRepo", rank: int, category: str, snapshots: dict) -> dict:
-    """Build an export row from a ForgeRepo."""
-    from forges.base import ForgeRepo
+    """Build an export row from a ForgeRepo.
 
-    delta = star_delta(
-        {"stargazers_count": repo.stars, "full_name": repo.full_name},
-        snapshots,
-    )
-    velocity = daily_velocity(
-        {"stargazers_count": repo.stars, "full_name": repo.full_name},
-        snapshots,
-    )
+    Args:
+        repo:       Normalized repository from a forge client.
+        rank:       1-based rank within the category.
+        category:   Category label used by the search path.
+        snapshots:  Snapshot mapping from ``load_snapshots()``.
+
+    Returns:
+        Dict suitable for JSON/CSV export, including velocity fields.
+    """
+    delta = star_delta(repo, snapshots)
+    velocity = daily_velocity(repo, snapshots)
     return {
         "rank": rank,
         "forge": repo.forge,
