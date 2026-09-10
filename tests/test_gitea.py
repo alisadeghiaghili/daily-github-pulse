@@ -55,12 +55,9 @@ class TestGiteaClient:
     def test_get_token_env_var(self, client):
         assert client.get_token_env_var() == "GITEA_TOKEN"
 
-    @patch("daily_github_pulse.forges.gitea.requests.get")
+    @patch("daily_github_pulse.forges.gitea.get_json")
     def test_search_repos(self, mock_get, client, sample_repo):
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"data": [sample_repo]}
-        mock_resp.raise_for_status.return_value = None
-        mock_get.return_value = mock_resp
+        mock_get.return_value = {"data": [sample_repo]}
 
         results = client.search_repos(since_days=1, top_n=5)
 

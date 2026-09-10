@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [3.2.0] — 2026-09-11
+
+### Added
+- **`SearchQuery`** frozen model shared by forge clients and the CLI (`core/query.py`)
+- **HTTP helpers** (`core/http.py`): session factory, JSON access, `RateLimitError` / `HttpError`
+- **Snapshot pruning**: `prune_snapshots()` with age and entry-count caps; `save_snapshots(..., prune=True)`
+- Forge clients accept optional `query=` (preferred) while legacy kwargs still work
+
+### Changed
+- CLI token flags (`--token`, `--gitlab-token`, `--gitea-token`) emit `DeprecationWarning` and prefer env vars (process-listing leak risk)
+- CLI persists snapshots with prune enabled after successful runs
+- Forge clients use a shared session + timeout via `get_json()`
+
+### Security
+- Tokens should live in `.env` / environment, not argv
+
+---
+
 ## [3.1.0] — 2026-09-10
 
 ### Added

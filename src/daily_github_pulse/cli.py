@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
@@ -346,19 +347,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--token",
         default=None,
         metavar="TOKEN",
-        help="Primary forge token (GitHub by default). Overrides GITHUB_TOKEN.",
+        help=(
+            "Deprecated. Prefer GITHUB_TOKEN in the environment "
+            "(avoids leaking tokens via process listings)."
+        ),
     )
     parser.add_argument(
         "--gitlab-token",
         default=None,
         metavar="TOKEN",
-        help="GitLab personal access token. Overrides GITLAB_TOKEN.",
+        help="Deprecated. Prefer GITLAB_TOKEN in the environment.",
     )
     parser.add_argument(
         "--gitea-token",
         default=None,
         metavar="TOKEN",
-        help="Gitea/Codeberg API token. Overrides GITEA_TOKEN.",
+        help="Deprecated. Prefer GITEA_TOKEN in the environment.",
     )
     parser.add_argument(
         "-o",
@@ -415,10 +419,26 @@ def main() -> None:
         parser.error("--forge requires at least one forge name.")
 
     if args.token and "github" in forge_names:
+        warnings.warn(
+            "--token is deprecated and may leak via process listings; "
+            "set GITHUB_TOKEN in the environment instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         os.environ["GITHUB_TOKEN"] = args.token
     if args.gitlab_token:
+        warnings.warn(
+            "--gitlab-token is deprecated; set GITLAB_TOKEN in the environment",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         os.environ["GITLAB_TOKEN"] = args.gitlab_token
     if args.gitea_token:
+        warnings.warn(
+            "--gitea-token is deprecated; set GITEA_TOKEN in the environment",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         os.environ["GITEA_TOKEN"] = args.gitea_token
 
     if args.developers:
@@ -598,7 +618,7 @@ def main() -> None:
 
     if not args.no_snapshot:
         try:
-            save_snapshots(repos_by_category)
+            save_snapshots(repos_by_category, prune=True)
         except OSError as exc:
             print(f"  ⚠  Could not save snapshots: {exc}", file=sys.stderr)
 

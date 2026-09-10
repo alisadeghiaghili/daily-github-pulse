@@ -19,13 +19,21 @@ from daily_github_pulse.core.export import (
     export_json,
     write_output,
 )
+from daily_github_pulse.core.http import (
+    HttpError,
+    RateLimitError,
+    get_json,
+    open_session,
+)
 from daily_github_pulse.core.periods import PERIOD_DAYS, resolve_period
+from daily_github_pulse.core.query import SearchQuery
 from daily_github_pulse.core.velocity import (
     SNAPSHOT_DIR,
     SNAPSHOT_FILE,
     daily_velocity,
     elapsed_days,
     load_snapshots,
+    prune_snapshots,
     save_snapshots,
     star_delta,
 )
@@ -33,6 +41,9 @@ from daily_github_pulse.core.velocity import (
 __all__ = [
     "BoolNode",
     "Term",
+    "HttpError",
+    "RateLimitError",
+    "SearchQuery",
     "PERIOD_DAYS",
     "SNAPSHOT_DIR",
     "SNAPSHOT_FILE",
@@ -49,8 +60,11 @@ __all__ = [
     "expand_wildcards",
     "export_csv",
     "export_json",
+    "get_json",
     "load_snapshots",
+    "open_session",
     "parse_boolean_query",
+    "prune_snapshots",
     "resolve_period",
     "save_snapshots",
     "star_delta",

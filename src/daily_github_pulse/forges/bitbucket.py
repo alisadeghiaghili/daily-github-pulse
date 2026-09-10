@@ -12,7 +12,10 @@ from datetime import date, timedelta, timezone
 
 import requests
 
-from .base import ForgeClient, ForgeRepo, ForgeUser
+from daily_github_pulse.core.http import RateLimitError, get_json, open_session
+from daily_github_pulse.core.query import SearchQuery
+
+from .base import ForgeClient, ForgeRepo, ForgeUser, resolve_search_query
 from . import register_forge
 
 
@@ -48,6 +51,13 @@ class BitbucketClient(ForgeClient):
             return (self.username, self.app_password)
         return None
 
+    def _session(self) -> requests.Session:
+        session = open_session(None, bearer=False)
+        auth = self._get_auth()
+        if auth:
+            session.auth = auth
+        return session
+
     def search_repos(
         self,
         language: str | None = None,
@@ -59,54 +69,58 @@ class BitbucketClient(ForgeClient):
         keyword_not: list[str] | None = None,
         search_in: str = "name,description",
         bool_query: object | None = None,
+        query: SearchQuery | None = None,
     ) -> dict[str, list[ForgeRepo]]:
         """Search repositories on Bitbucket.
 
         Bitbucket doesn't have a "trending" endpoint, so we search
         repositories sorted by stars (watchers) with date filtering.
         """
-        since_date = (date.today() - timedelta(days=since_days)).isoformat()
+        q = resolve_search_query(
+            query,
+            language=language,
+            since_days=since_days,
+            top_n=top_n,
+            keyword=keyword,
+            keywords=keywords,
+            keyword_op=keyword_op,
+            keyword_not=keyword_not,
+            search_in=search_in,
+            bool_query=bool_query,
+        )
+        since_date = q.since_date
 
-        # Build search query
         search_terms = []
-        if keyword:
-            search_terms.append(keyword)
-        elif keywords:
-            search_terms.extend(keywords)
+        if q.keyword:
+            search_terms.append(q.keyword)
+        elif q.keywords:
+            search_terms.extend(q.keywords)
 
-        # Bitbucket uses workspace/repo structure
-        # We search across all public repos
         params = {
             "sort": "-stargazers_count",
-            "pagelen": min(top_n * 2, 50),
+            "pagelen": min(q.top_n * 2, 50),
         }
 
         if search_terms:
             params["q"] = " ".join(search_terms)
 
+        session = self._session()
         try:
-            auth = self._get_auth()
-            resp = requests.get(
-                f"{self.BASE_URL}/repositories",
-                auth=auth,
-                params=params,
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            repos_data = data.get("values", [])
-        except requests.RequestException:
+            data = get_json(session, f"{self.BASE_URL}/repositories", params=params)
+            repos_data = data.get("values", []) if isinstance(data, dict) else []
+        except RateLimitError:
+            raise
+        except Exception:
             return {}
+        finally:
+            session.close()
 
         # Categorize results
         new_repos = []
         active_repos = []
 
-        for r in repos_data[:top_n * 2]:
-            # Extract language from languages link if available
-            lang = None
-            if "language" in r:
-                lang = r["language"]
+        for r in repos_data[: q.top_n * 2]:
+            lang = r.get("language")
 
             repo = ForgeRepo(
                 forge="bitbucket",
@@ -129,14 +143,14 @@ class BitbucketClient(ForgeClient):
 
         results = {}
         if new_repos:
-            results["New & Relevant"] = new_repos[:top_n]
+            results["New & Relevant"] = new_repos[: q.top_n]
         if active_repos:
-            results["Active & Relevant"] = active_repos[:top_n]
+            results["Active & Relevant"] = active_repos[: q.top_n]
 
         if not results:
             all_repos = new_repos + active_repos
             if all_repos:
-                results["Trending Repositories"] = all_repos[:top_n]
+                results["Trending Repositories"] = all_repos[: q.top_n]
 
         return results
 

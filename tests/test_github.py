@@ -18,10 +18,6 @@ from forges.github import GitHubClient, _get_headers
 from forges.base import ForgeRepo, ForgeUser
 
 
-# ──────────────────────────────────────────────
-# Fixtures
-# ──────────────────────────────────────────────
-
 @pytest.fixture()
 def client():
     """A GitHubClient with a test token."""
@@ -43,10 +39,6 @@ def sample_repo_data():
         "html_url": "https://github.com/owner/repo",
     }
 
-
-# ──────────────────────────────────────────────
-# Tests
-# ──────────────────────────────────────────────
 
 class TestGetHeaders:
     def test_no_token_omits_authorization(self):
@@ -75,24 +67,18 @@ class TestGitHubClient:
     def test_get_token_env_var(self, client):
         assert client.get_token_env_var() == "GITHUB_TOKEN"
 
-    @patch("daily_github_pulse.forges.github.requests.get")
+    @patch("daily_github_pulse.forges.github.get_json")
     def test_search_repos_browse_mode(self, mock_get, client, sample_repo_data):
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"items": [sample_repo_data]}
-        mock_resp.raise_for_status.return_value = None
-        mock_get.return_value = mock_resp
+        mock_get.return_value = {"items": [sample_repo_data]}
 
         results = client.search_repos(since_days=1, top_n=5)
 
         assert "New Today" in results or "Active Giants" in results
         assert mock_get.called
 
-    @patch("daily_github_pulse.forges.github.requests.get")
+    @patch("daily_github_pulse.forges.github.get_json")
     def test_search_repos_returns_forge_repos(self, mock_get, client, sample_repo_data):
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"items": [sample_repo_data]}
-        mock_resp.raise_for_status.return_value = None
-        mock_get.return_value = mock_resp
+        mock_get.return_value = {"items": [sample_repo_data]}
 
         results = client.search_repos(since_days=1, top_n=5)
 
@@ -101,16 +87,12 @@ class TestGitHubClient:
                 assert isinstance(repo, ForgeRepo)
                 assert repo.forge == "github"
 
-    @patch("daily_github_pulse.forges.github.requests.get")
+    @patch("daily_github_pulse.forges.github.get_json")
     def test_search_repos_with_language(self, mock_get, client, sample_repo_data):
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"items": [sample_repo_data]}
-        mock_resp.raise_for_status.return_value = None
-        mock_get.return_value = mock_resp
+        mock_get.return_value = {"items": [sample_repo_data]}
 
         client.search_repos(language="python", since_days=1, top_n=5)
 
-        # Check that language was added to query
         call_args = mock_get.call_args
         assert "language:python" in call_args[1]["params"]["q"]
 
