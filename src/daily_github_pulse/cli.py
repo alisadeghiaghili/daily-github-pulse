@@ -346,19 +346,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--token",
         default=None,
         metavar="TOKEN",
-        help="Primary forge token (GitHub by default). Overrides GITHUB_TOKEN.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--gitlab-token",
         default=None,
         metavar="TOKEN",
-        help="GitLab personal access token. Overrides GITLAB_TOKEN.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--gitea-token",
         default=None,
         metavar="TOKEN",
-        help="Gitea/Codeberg API token. Overrides GITEA_TOKEN.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "-o",
@@ -414,11 +414,15 @@ def main() -> None:
     if not forge_names:
         parser.error("--forge requires at least one forge name.")
 
-    if args.token and "github" in forge_names:
-        os.environ["GITHUB_TOKEN"] = args.token
+    if args.token:
+        print("WARNING: Passing tokens via --token is deprecated and insecure. Use the GITHUB_TOKEN environment variable instead.", file=sys.stderr)
+        if "github" in forge_names:
+            os.environ["GITHUB_TOKEN"] = args.token
     if args.gitlab_token:
+        print("WARNING: Passing tokens via --gitlab-token is deprecated and insecure. Use the GITLAB_TOKEN environment variable instead.", file=sys.stderr)
         os.environ["GITLAB_TOKEN"] = args.gitlab_token
     if args.gitea_token:
+        print("WARNING: Passing tokens via --gitea-token is deprecated and insecure. Use the GITEA_TOKEN environment variable instead.", file=sys.stderr)
         os.environ["GITEA_TOKEN"] = args.gitea_token
 
     if args.developers:
