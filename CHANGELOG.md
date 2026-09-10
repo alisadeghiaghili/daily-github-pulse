@@ -6,6 +6,26 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [3.1.0] — 2026-09-10
+
+### Added
+- **Package layout** under `src/daily_github_pulse/` with `core/`, `forges/`, `ai/`, and `display/`
+- **`pyproject.toml`** — installable package, console script `daily-github-pulse`, optional extras (`rich`, `ai`, `dev`)
+- **`python -m daily_github_pulse`** as the supported module entry point
+- Core modules: `boolean`, `velocity`, `export`, `periods`
+
+### Changed
+- Forge clients import boolean-query helpers from `core` instead of the legacy monolith
+- `github_repo_of_the_day.py` is a compatibility façade re-exporting package APIs
+- Root `forges/` and `rich_display.py` are thin re-export shims for existing imports
+- GitLab language filter folds the language into `search` instead of misusing `topic`
+- CI installs the package via `pip install -e ".[rich,dev]"`
+
+### Removed
+- Root `daily_github_pulse.py` script (shadowed the package); use `python -m daily_github_pulse` or the console script
+
+---
+
 ## [3.0.1] — 2026-07-26
 
 ### Fixed

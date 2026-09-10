@@ -54,7 +54,7 @@ class TestGitLabClient:
     def test_get_token_env_var(self, client):
         assert client.get_token_env_var() == "GITLAB_TOKEN"
 
-    @patch("forges.gitlab.requests.get")
+    @patch("daily_github_pulse.forges.gitlab.requests.get")
     def test_search_repos(self, mock_get, client, sample_project):
         mock_resp = MagicMock()
         mock_resp.json.return_value = [sample_project]
@@ -69,7 +69,7 @@ class TestGitLabClient:
                 assert isinstance(repo, ForgeRepo)
                 assert repo.forge == "gitlab"
 
-    @patch("forges.gitlab.requests.get")
+    @patch("daily_github_pulse.forges.gitlab.requests.get")
     def test_search_repos_empty(self, mock_get, client):
         mock_resp = MagicMock()
         mock_resp.json.return_value = []
@@ -79,7 +79,7 @@ class TestGitLabClient:
         results = client.search_repos(since_days=1, top_n=5)
         assert results == {}
 
-    @patch("forges.gitlab.requests.get")
+    @patch("daily_github_pulse.forges.gitlab.requests.get")
     def test_fetch_readme(self, mock_get, client):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -90,7 +90,7 @@ class TestGitLabClient:
         result = client.fetch_readme("owner/repo")
         assert result == "# README"
 
-    @patch("forges.gitlab.requests.get")
+    @patch("daily_github_pulse.forges.gitlab.requests.get")
     def test_search_developers(self, mock_get, client):
         mock_resp = MagicMock()
         mock_resp.json.return_value = [

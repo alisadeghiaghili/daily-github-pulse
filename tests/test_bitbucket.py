@@ -54,7 +54,7 @@ class TestBitbucketClient:
     def test_get_token_env_var(self, client):
         assert client.get_token_env_var() == "BITBUCKET_USER"
 
-    @patch("forges.bitbucket.requests.get")
+    @patch("daily_github_pulse.forges.bitbucket.requests.get")
     def test_search_repos(self, mock_get, client, sample_repo):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"values": [sample_repo]}
@@ -69,7 +69,7 @@ class TestBitbucketClient:
                 assert isinstance(repo, ForgeRepo)
                 assert repo.forge == "bitbucket"
 
-    @patch("forges.bitbucket.requests.get")
+    @patch("daily_github_pulse.forges.bitbucket.requests.get")
     def test_fetch_readme(self, mock_get, client):
         mock_resp = MagicMock()
         mock_resp.status_code = 200

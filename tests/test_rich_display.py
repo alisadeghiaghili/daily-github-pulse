@@ -40,12 +40,16 @@ def _capture_console(func, *args, **kwargs) -> str:
     buf = io.StringIO()
     con = Console(file=buf, highlight=False, no_color=True, width=200)
     # Temporarily replace the module-level console
+    from daily_github_pulse.display import rich as rd_rich
     original = rd.console
+    original_pkg = rd_rich.console
     rd.console = con
+    rd_rich.console = con
     try:
         func(*args, **kwargs)
     finally:
         rd.console = original
+    rd_rich.console = original_pkg
     return buf.getvalue()
 
 
@@ -418,6 +422,9 @@ class TestMakeAiFilterProgress:
             pytest.fail(f"Progress context manager raised: {exc}")
 
     def test_returns_none_when_rich_unavailable(self, monkeypatch):
+        from daily_github_pulse.display import rich as rd_rich
+
         monkeypatch.setattr(rd, "RICH_AVAILABLE", False)
+        monkeypatch.setattr(rd_rich, "RICH_AVAILABLE", False)
         result = rd.make_ai_filter_progress()
         assert result is None

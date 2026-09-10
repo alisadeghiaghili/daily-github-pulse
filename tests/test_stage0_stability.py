@@ -24,6 +24,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import daily_github_pulse as pulse
 import github_repo_of_the_day as legacy
+from daily_github_pulse.cli import (
+    _build_arg_parser,
+    build_forge_export_row,
+    format_forge_repo,
+)
 from forges.base import ForgeRepo
 
 
@@ -64,7 +69,7 @@ class TestVersionBinding:
         assert pulse.VERSION == legacy.VERSION
 
     def test_arg_parser_builds_without_nameerror(self):
-        parser = pulse._build_arg_parser()
+        parser = _build_arg_parser()
         assert parser.prog == "daily_github_pulse"
 
 
@@ -78,14 +83,14 @@ class TestForgeVelocityDisplay:
         assert velocity == pytest.approx(25.0, rel=0.1)
 
     def test_format_forge_repo_includes_velocity(self, forge_repo, forge_snapshots):
-        text = pulse.format_forge_repo(forge_repo, rank=1, snapshots=forge_snapshots)
+        text = format_forge_repo(forge_repo, rank=1, snapshots=forge_snapshots)
         assert "owner/repo" in text
         assert "[GITHUB]" in text
         assert "first run" not in text.lower()
         assert "+50" in text
 
     def test_build_forge_export_row_velocity(self, forge_repo, forge_snapshots):
-        row = pulse.build_forge_export_row(
+        row = build_forge_export_row(
             forge_repo, rank=1, category="New Today", snapshots=forge_snapshots
         )
         assert row["forge"] == "github"
@@ -133,8 +138,13 @@ class TestAIFilterForgeRepo:
             model="test-model",
             api_key="k",
         )
-        with patch.object(legacy, "fetch_readme_snippet", return_value="readme text"), \
-             patch.object(legacy, "_call_openai_compatible", return_value="YES: matches intent"):
+        with patch(
+            "daily_github_pulse.ai.filter.fetch_readme_snippet",
+            return_value="readme text",
+        ), patch(
+            "daily_github_pulse.ai.filter.call_openai_compatible",
+            return_value="YES: matches intent",
+        ):
             relevant, reason = legacy.is_repo_relevant(forge_repo, "inference", config)
         assert relevant is True
         assert "matches" in reason
@@ -142,8 +152,12 @@ class TestAIFilterForgeRepo:
     def test_apply_ai_filter_keeps_relevant_forge_repos(self, forge_repo):
         config = legacy.AIFilterConfig(api_key="k")
         repos_by_category = {"All Forges": [forge_repo]}
-        with patch.object(legacy, "fetch_readme_snippet", return_value=""), \
-             patch.object(legacy, "_call_openai_compatible", return_value="YES: ok"):
+        with patch(
+            "daily_github_pulse.ai.filter.fetch_readme_snippet", return_value=""
+        ), patch(
+            "daily_github_pulse.ai.filter.call_openai_compatible",
+            return_value="YES: ok",
+        ):
             result = legacy.apply_ai_filter(
                 repos_by_category,
                 query="python tools",
@@ -155,8 +169,12 @@ class TestAIFilterForgeRepo:
     def test_apply_ai_filter_drops_irrelevant_forge_repos(self, forge_repo):
         config = legacy.AIFilterConfig(api_key="k")
         repos_by_category = {"All Forges": [forge_repo]}
-        with patch.object(legacy, "fetch_readme_snippet", return_value=""), \
-             patch.object(legacy, "_call_openai_compatible", return_value="NO: unrelated"):
+        with patch(
+            "daily_github_pulse.ai.filter.fetch_readme_snippet", return_value=""
+        ), patch(
+            "daily_github_pulse.ai.filter.call_openai_compatible",
+            return_value="NO: unrelated",
+        ):
             result = legacy.apply_ai_filter(
                 repos_by_category,
                 query="quantum",

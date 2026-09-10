@@ -1,592 +1,103 @@
 #!/usr/bin/env python3
 """
-daily-github-pulse  v3.0.0
-Discover GitHub's top trending repositories and developers —
-with real star velocity, boolean keyword search, wildcard expansion,
-and AI relevance filtering.
+Legacy entry point and public API façade for daily-github-pulse.
 
-NOTE: This is the legacy entry point for backward compatibility.
-For multi-forge support (GitHub, GitLab, Gitea/Codeberg, Bitbucket),
-use daily_github_pulse.py instead.
-──────────────────────────────────────────────────────────────────────
-Run it once. See what's blowing up on GitHub right now.
+Implementation lives in the ``daily_github_pulse`` package. This module
+re-exports the historical names so existing scripts and tests keep working,
+and retains the GitHub-only search helpers that return raw API dicts.
 
-  python github_repo_of_the_day.py                    # today's hottest repos
-  python github_repo_of_the_day.py --developers        # trending developers
-  python github_repo_of_the_day.py --language python   # filter by language
-  python github_repo_of_the_day.py --period week       # last 7 days
+Prefer::
 
-What you get
-────────────
-A ranked list of repositories (or developers) pulled live from the GitHub API,
-sorted by stars.  Run it again tomorrow and it also shows you how many stars
-each repo gained since your last run — so you see momentum, not just totals.
-
-  ======================================================================
-  #1  openai/openai-python
-      Stars: 24,312  Forks: 3,201  Lang: Python
-    Δ +418 ⭐ total  |  ~418.0 ⭐/day
-      Created: 2022-11-01  |  Updated: 2026-06-03
-      The official Python library for the OpenAI API
-      https://github.com/openai/openai-python
-
-Need more precision? Layer on filters
-──────────────────────────────────────
-  # Boolean keyword search
-  python github_repo_of_the_day.py --bool-query '(LLM OR GPT) AND agent AND NOT benchmark'
-
-  # Wildcard expansion  (analy?e → analyse OR analyze)
-  python github_repo_of_the_day.py --keywords "analy?e" agent --wildcard
-
-  # Let an LLM pick only the repos that match your actual intent
-  python github_repo_of_the_day.py --keywords LLM --ai-filter "production-ready inference servers"
-
-  # Export to CSV / JSON
-  python github_repo_of_the_day.py --output csv --output-file results.csv
-
-Token setup (optional — raises rate limit from 60 to 5,000 req/hr)
-────────────────────────────────────────────────────────────────────
-  cp .env.example .env   # then set GITHUB_TOKEN=ghp_...
-  Get a token: https://github.com/settings/tokens
-
-How velocity works
-──────────────────
-On each run, star counts are saved to a local snapshot file:
-  ~/.daily-github-pulse/snapshots.json
-
-Each snapshot entry stores:
-  - stars     : star count at save time
-  - saved_at  : UTC ISO timestamp of the save
-
-On the next run two velocity numbers are computed:
-
-  star_delta      — raw difference (current − snapshot), regardless of
-                    how much time has passed between runs.
-
-  daily_velocity  — time-normalised rate: star_delta / elapsed_days.
-                    This is the number that stays meaningful even if you
-                    haven't run the tool for two weeks.
-                    Rounded to one decimal place.
-                    None when no previous snapshot exists (first run).
-
-Token priority
-──────────────
-  1. --token CLI flag
-  2. GITHUB_TOKEN environment variable / .env file
-  3. Unauthenticated  →  60 req/hr limit
-
-Keyword search modes
-────────────────────
-  --keyword      Single term (legacy).  Searches name+description by default.
-  --keywords     Multiple terms joined with AND/OR via --keyword-op.
-  --bool-query   Full boolean expression with AND, OR, NOT, parentheses.
-                 Parsed into an AST and sent through its own dedicated path —
-                 NOT converted to a raw string before being passed down.
-
-Wildcard expansion
-──────────────────
-  Pass --wildcard to expand ? and * patterns in --keywords before building
-  the GitHub query.  Expansion is done client-side against the NLTK words
-  corpus (auto-downloaded on first use).  Requires: pip install nltk
-
-  ?  matches exactly one character   analy?e  → analyse OR analyze
-  *  matches zero or more characters  optimiz* → optimize OR optimized OR ...
-
-  If NLTK is unavailable the term is passed through unchanged.
-
-AI Relevance Filter
-────────────────────
-  Pass --ai-filter with --ai-filter-query "your intent" to post-filter results
-  through an LLM.  The LLM reads the repo description + README snippet and
-  decides if the repo is relevant to your query.
-
-  Supported backends (set in .env):
-    OpenAI-compatible  — OpenAI, Ollama, LM Studio, vLLM, Groq, Together AI,
-                         OpenRouter, and any server that speaks the OpenAI API.
-    Anthropic          — native Claude API (set AI_PROVIDER=anthropic).
-
-  .env keys:
-    AI_PROVIDER=openai            # openai (default) | anthropic
-    AI_BASE_URL=https://...       # for openai-compatible backends
-    AI_MODEL=gpt-4o-mini          # model name
-    AI_API_KEY=sk-...             # API key (use "ollama" for local Ollama)
-    ANTHROPIC_API_KEY=sk-ant-...  # Anthropic only
-    ANTHROPIC_MODEL=claude-haiku-4-5  # Anthropic only
-
-  Fallback behaviour when LLM is unavailable:
-    --ai-filter-fallback=fail        (default) — exits with error
-    --ai-filter-fallback=passthrough — warns and shows all repos unfiltered
+    python -m daily_github_pulse
+    daily-github-pulse
 """
 
 from __future__ import annotations
 
-import csv
-import io
-import json
 import os
-import re
 import sys
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from pathlib import Path
-from typing import Literal, Union
+from typing import Union
 
 import requests
 
+_SRC = Path(__file__).resolve().parent / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
-    pass  # python-dotenv is optional
+    pass
 
-# ──────────────────────────────────────────────
-# Rich display — optional, graceful fallback
-# ──────────────────────────────────────────────
+from daily_github_pulse import VERSION  # noqa: E402
+from daily_github_pulse.ai.filter import (  # noqa: E402
+    AIFilterConfig,
+    apply_ai_filter,
+    call_anthropic as _call_anthropic,
+    call_openai_compatible as _call_openai_compatible,
+    fetch_readme_snippet,
+    is_repo_relevant,
+    load_ai_filter_config,
+    repo_identity,
+)
+from daily_github_pulse.core.boolean import (  # noqa: E402
+    VALID_KEYWORD_OPS,
+    VALID_SEARCH_IN,
+    BoolNode,
+    Term,
+    _validate_search_in,
+    apply_wildcards_to_keywords,
+    build_keyword_qualifier,
+    expand_wildcards,
+    parse_boolean_query,
+)
+from daily_github_pulse.core.export import (  # noqa: E402
+    DEV_EXPORT_FIELDS,
+    EXPORT_FIELDS,
+    build_dev_export_row,
+    build_export_row,
+    export_csv,
+    export_json,
+    write_output,
+)
+from daily_github_pulse.core.periods import PERIOD_DAYS, resolve_period  # noqa: E402
+from daily_github_pulse.core.velocity import (  # noqa: E402
+    SNAPSHOT_DIR,
+    SNAPSHOT_FILE,
+    daily_velocity,
+    elapsed_days,
+    load_snapshots,
+    save_snapshots,
+    star_delta,
+)
+from daily_github_pulse.display.plain import (  # noqa: E402
+    format_developer,
+    format_repo,
+    format_velocity,
+)
+
 try:
-    from rich_display import (
+    from daily_github_pulse.display.rich import (  # noqa: E402
+        RICH_AVAILABLE,
+        make_ai_filter_progress,
+        print_developer_table,
         print_header,
         print_repo_table,
-        print_developer_table,
-        make_ai_filter_progress,
-        RICH_AVAILABLE,
     )
 except ImportError:
     RICH_AVAILABLE = False
-    print_header = None              # type: ignore[assignment]
-    print_repo_table = None          # type: ignore[assignment]
-    print_developer_table = None     # type: ignore[assignment]
-    make_ai_filter_progress = None   # type: ignore[assignment]
-
-# ──────────────────────────────────────────────
-# Constants
-# ──────────────────────────────────────────────
-VERSION = "3.0.1"
-SNAPSHOT_DIR = Path.home() / ".daily-github-pulse"
-SNAPSHOT_FILE = SNAPSHOT_DIR / "snapshots.json"
+    print_header = None  # type: ignore[assignment]
+    print_repo_table = None  # type: ignore[assignment]
+    print_developer_table = None  # type: ignore[assignment]
+    make_ai_filter_progress = None  # type: ignore[assignment]
 
 GITHUB_TOKEN: str | None = os.getenv("GITHUB_TOKEN")
 
-# Named period shortcuts → number of days
-PERIOD_DAYS: dict[str, int] = {
-    "day":   1,
-    "week":  7,
-    "month": 30,
-}
 
-# Valid tokens for the --search-in / search_in parameter
-VALID_SEARCH_IN = {"name", "description", "readme"}
-
-# Valid boolean operators for multi-keyword search
-VALID_KEYWORD_OPS = {"AND", "OR"}
-
-# Fields included in JSON / CSV exports (in order)
-EXPORT_FIELDS = [
-    "rank",
-    "category",
-    "full_name",
-    "stars",
-    "star_delta",
-    "daily_velocity",
-    "forks",
-    "language",
-    "description",
-    "created_at",
-    "updated_at",
-    "url",
-]
-
-# Fields included in developer JSON / CSV exports (in order)
-DEV_EXPORT_FIELDS = [
-    "rank",
-    "login",
-    "name",
-    "company",
-    "location",
-    "public_repos",
-    "followers",
-    "following",
-    "url",
-]
-
-
-# ──────────────────────────────────────────────
-# Boolean query AST nodes
-# ──────────────────────────────────────────────
-
-@dataclass(frozen=True, eq=True)
-class Term:
-    """
-    A single search term, optionally negated.
-
-    Attributes:
-        value:   The raw term string (stripped of surrounding quotes).
-        negated: True when this term was preceded by NOT.
-
-    Examples:
-        >>> Term("LLM")
-        Term(value='LLM', negated=False)
-        >>> Term("benchmark", negated=True)
-        Term(value='benchmark', negated=True)
-    """
-    value: str
-    negated: bool = False
-
-
-@dataclass(frozen=True, eq=True)
-class BoolNode:
-    """
-    A binary/n-ary boolean expression node.
-
-    Attributes:
-        op:       The boolean operator: ``"AND"`` or ``"OR"``.
-        children: Two or more child nodes, each a ``Term`` or ``BoolNode``.
-
-    All children in a BoolNode share the same operator.  Mixing AND and OR
-    at the same level requires parentheses, which produce nested BoolNodes.
-
-    Examples:
-        >>> BoolNode("AND", [Term("LLM"), Term("agent")])
-        BoolNode(op='AND', children=[Term(value='LLM', negated=False), ...])
-    """
-    op: str
-    children: list[Union["Term", "BoolNode"]] = field(default_factory=list)
-
-
-# ──────────────────────────────────────────────
-# Boolean query parser
-# ──────────────────────────────────────────────
-
-def parse_boolean_query(expr: str) -> Union[Term, BoolNode]:
-    """
-    Parse a Boolean keyword expression into an AST.
-
-    Supported syntax::
-
-        term
-        NOT term
-        "quoted phrase"
-        NOT "quoted phrase"
-        A AND B
-        A OR B
-        A AND B AND C          (flat n-ary AND)
-        (A OR B) AND C         (nested groups)
-        (A AND NOT B) OR C     (NOT inside a group)
-
-    Operators (AND, OR, NOT) are case-insensitive.
-    Leading/trailing whitespace in the expression and around each term
-    is stripped.
-    Quoted phrases are treated as single terms.
-
-    Args:
-        expr: Boolean keyword string.
-
-    Returns:
-        A ``Term`` for a single (possibly negated) term, or a ``BoolNode``
-        for a compound expression.
-
-    Raises:
-        ValueError: If ``expr`` is empty or whitespace-only.
-        ValueError: If parentheses are unbalanced.
-        ValueError: If two terms appear consecutively without an operator.
-        ValueError: If an operator appears with no right-hand operand
-                    (dangling AND/OR/NOT).
-
-    Examples:
-        >>> parse_boolean_query("LLM")
-        Term(value='LLM', negated=False)
-        >>> parse_boolean_query("NOT benchmark")
-        Term(value='benchmark', negated=True)
-        >>> parse_boolean_query("LLM AND agent")
-        BoolNode(op='AND', children=[Term(value='LLM', ...), Term(value='agent', ...)])
-        >>> parse_boolean_query('(LLM OR GPT) AND agent AND NOT benchmark')
-        BoolNode(op='AND', children=[BoolNode(op='OR', ...), Term('agent'), Term('benchmark', negated=True)])
-    """
-    expr = expr.strip()
-    if not expr:
-        raise ValueError("parse_boolean_query: expression is empty.")
-
-    tokens = _tokenise(expr)
-    ast, pos = _parse_expr(tokens, 0)
-    if pos != len(tokens):
-        raise ValueError(
-            f"parse_boolean_query: unexpected token '{tokens[pos]}' "
-            f"at position {pos}."
-        )
-    return ast
-
-
-# ── internal tokeniser ──────────────────────────────────────────────────────
-
-_TOKEN_RE = re.compile(
-    r'"[^"]*"'          # quoted phrase
-    r'|\('              # open paren
-    r'|\)'              # close paren
-    r'|[^\s()\"]+',     # bare word / operator
-    re.IGNORECASE,
-)
-
-
-def _tokenise(expr: str) -> list[str]:
-    """Split expression into a flat token list."""
-    return _TOKEN_RE.findall(expr)
-
-
-# ── recursive-descent parser ────────────────────────────────────────────────
-
-def _parse_expr(
-    tokens: list[str], pos: int, inside_group: bool = False
-) -> tuple[Union[Term, BoolNode], int]:
-    """
-    Parse tokens[pos:] into an AST node.
-
-    Grammar (informal)::
-
-        expr    ::= operand (OP operand)*
-        operand ::= NOT? atom
-        atom    ::= TERM | '(' expr ')'
-        OP      ::= AND | OR
-
-    A group's top-level operator must be homogeneous (all AND or all OR).
-    Mixing operators at the same nesting level without parens raises
-    ValueError.
-
-    Returns:
-        (node, new_pos)
-    """
-    children: list[Union[Term, BoolNode]] = []
-    op: str | None = None
-    last_was_operand = False
-
-    while pos < len(tokens):
-        tok = tokens[pos]
-        upper = tok.upper()
-
-        if tok == ")":
-            if not inside_group:
-                raise ValueError(
-                    "parse_boolean_query: unbalanced parentheses — "
-                    f"unexpected ')' at position {pos}."
-                )
-            break
-
-        if upper in ("AND", "OR"):
-            if not children:
-                raise ValueError(
-                    f"parse_boolean_query: operator '{tok}' at position {pos} "
-                    "has no left-hand operand."
-                )
-            if op is not None and op != upper:
-                raise ValueError(
-                    f"parse_boolean_query: mixed operators '{op}' and '{upper}' "
-                    "at the same level — use parentheses to disambiguate."
-                )
-            op = upper
-            last_was_operand = False
-            pos += 1
-            continue
-
-        negated = False
-        if upper == "NOT":
-            pos += 1
-            if pos >= len(tokens) or tokens[pos] in ("AND", "OR", "NOT", ")"):
-                raise ValueError(
-                    f"parse_boolean_query: 'NOT' at position {pos - 1} "
-                    "has no operand."
-                )
-            negated = True
-            tok = tokens[pos]
-
-        if last_was_operand:
-            raise ValueError(
-                f"parse_boolean_query: missing operator before '{tok}' "
-                f"at position {pos}. "
-                "Did you forget AND or OR?"
-            )
-
-        if tok == "(":
-            pos += 1
-            if pos >= len(tokens):
-                raise ValueError(
-                    "parse_boolean_query: unbalanced parentheses — "
-                    "'(' was never closed."
-                )
-            child, pos = _parse_expr(tokens, pos, inside_group=True)
-            if pos >= len(tokens) or tokens[pos] != ")":
-                raise ValueError(
-                    "parse_boolean_query: unbalanced parentheses — "
-                    "'(' was never closed."
-                )
-            pos += 1
-            children.append(child)
-        else:
-            value = tok.strip('"')
-            children.append(Term(value=value, negated=negated))
-            pos += 1
-
-        last_was_operand = True
-
-    if not children:
-        raise ValueError(
-            "parse_boolean_query: expression is empty or contains only operators."
-        )
-
-    if op is not None and len(children) == 1:
-        raise ValueError(
-            f"parse_boolean_query: dangling operator '{op}' — "
-            "no right-hand operand."
-        )
-
-    if len(children) == 1:
-        return children[0], pos
-
-    if op is None:
-        raise ValueError(
-            "parse_boolean_query: missing operator between terms."
-        )
-
-    return BoolNode(op=op, children=children), pos
-
-
-# ──────────────────────────────────────────────
-# Wildcard expansion
-# ──────────────────────────────────────────────
-
-def _load_wordlist() -> set[str] | None:
-    """
-    Load the NLTK words corpus as a lower-cased set.
-
-    Downloads the corpus automatically on first use if NLTK is available.
-    Returns None when NLTK is not installed, so callers can fall back
-    gracefully.
-
-    Returns:
-        set of lower-cased English words, or None if NLTK is unavailable.
-    """
-    try:
-        import nltk  # type: ignore
-        from nltk.corpus import words as nltk_words  # type: ignore
-        try:
-            word_set = set(w.lower() for w in nltk_words.words())
-        except LookupError:
-            nltk.download("words", quiet=True)
-            word_set = set(w.lower() for w in nltk_words.words())
-        return word_set
-    except ImportError:
-        return None
-
-
-def expand_wildcards(
-    term: str,
-    wordlist: set[str] | None = None,
-    max_variants: int = 20,
-) -> list[str]:
-    """
-    Expand a wildcard term into matching English words.
-
-    Wildcard syntax::
-
-        ?   matches exactly one character   (single-char slot)
-        *   matches zero or more characters  (any-length slot)
-
-    The pattern is anchored to the full word (start and end), so
-    ``analy?e`` does NOT match ``analysed`` — only exact-length matches.
-
-    Expansion is done against the NLTK English words corpus.  If NLTK is
-    unavailable, the original term is returned as a single-element list
-    (no expansion, no crash).
-
-    Args:
-        term:         Keyword string that may contain ``?`` and/or ``*``.
-        wordlist:     Pre-loaded word set (``set[str]``, lower-cased).
-                      Pass ``None`` to trigger lazy loading.
-        max_variants: Upper bound on variants returned.  Default: 20.
-
-    Returns:
-        List of matching words (lower-cased, deduplicated, sorted).
-        Returns ``[term]`` unchanged when no wildcards, NLTK unavailable,
-        or no matches found.
-
-    Examples:
-        >>> expand_wildcards("analy?e")       # doctest: +SKIP
-        ['analyse', 'analyze']
-        >>> expand_wildcards("no_wildcard")
-        ['no_wildcard']
-        >>> expand_wildcards("optimiz*")      # doctest: +SKIP
-        ['optimize', 'optimized', 'optimizes', 'optimizing', ...]
-    """
-    if "?" not in term and "*" not in term:
-        return [term]
-
-    if wordlist is None:
-        wordlist = _load_wordlist()
-
-    if wordlist is None:
-        return [term]
-
-    escaped = re.escape(term)
-    pattern = (
-        escaped
-        .replace(re.escape("?"), r".")
-        .replace(re.escape("*"), r".*")
-    )
-    regex = re.compile(r"^" + pattern + r"$", re.IGNORECASE)
-
-    matches = sorted(
-        {w for w in wordlist if regex.match(w)}
-    )[:max_variants]
-
-    return matches if matches else [term]
-
-
-def apply_wildcards_to_keywords(
-    keywords: list[str],
-    wordlist: set[str] | None = None,
-) -> list[str]:
-    """
-    Expand any wildcard patterns inside a keyword list.
-
-    Each keyword that contains ``?`` or ``*`` is replaced by its expanded
-    variants wrapped in parentheses and joined with OR, e.g.::
-
-        ["analy?e", "agent"]
-        → ["(analyse OR analyze)", "agent"]
-
-    Keywords without wildcards are returned unchanged.
-
-    Args:
-        keywords: List of raw keyword strings (may contain wildcards).
-        wordlist: Pre-loaded word set.  When ``None``, corpus is loaded once.
-
-    Returns:
-        New list where wildcard terms have been replaced by their expansions.
-
-    Examples:
-        >>> apply_wildcards_to_keywords(["analy?e", "agent"])  # doctest: +SKIP
-        ['(analyse OR analyze)', 'agent']
-        >>> apply_wildcards_to_keywords(["agent"])             # no wildcards
-        ['agent']
-    """
-    if not any("?" in kw or "*" in kw for kw in keywords):
-        return keywords
-
-    wl = wordlist if wordlist is not None else _load_wordlist()
-
-    result: list[str] = []
-    for kw in keywords:
-        if "?" not in kw and "*" not in kw:
-            result.append(kw)
-        else:
-            variants = expand_wildcards(kw, wordlist=wl)
-            if len(variants) == 1 and variants[0] == kw:
-                result.append(kw)
-            else:
-                result.append("(" + " OR ".join(variants) + ")")
-    return result
-
-
-# ──────────────────────────────────────────────
-# GitHub API helpers
-# ──────────────────────────────────────────────
 def get_headers() -> dict:
     """Build HTTP headers for the GitHub REST API."""
     headers = {"Accept": "application/vnd.github+json"}
@@ -595,326 +106,6 @@ def get_headers() -> dict:
     return headers
 
 
-# ──────────────────────────────────────────────
-# Period helpers
-# ──────────────────────────────────────────────
-def resolve_period(period: str | None, days: int) -> int:
-    """
-    Resolve the effective look-back window in days.
-
-    ``--period`` takes precedence over ``--days`` when both are supplied.
-
-    Args:
-        period: Named period string (``"day"``, ``"week"``, ``"month"``),
-                or ``None``.
-        days:   Numeric fallback from ``--days`` (default: 1).
-
-    Returns:
-        Resolved number of look-back days.
-
-    Raises:
-        ValueError: If ``period`` is not a recognised token.
-
-    Examples:
-        >>> resolve_period("week", 1)
-        7
-        >>> resolve_period(None, 3)
-        3
-    """
-    if period is None:
-        return days
-    key = period.strip().lower()
-    if key not in PERIOD_DAYS:
-        raise ValueError(
-            f"Unknown period '{period}'. Valid options: "
-            + ", ".join(PERIOD_DAYS)
-        )
-    return PERIOD_DAYS[key]
-
-
-# ──────────────────────────────────────────────
-# Keyword qualifier builder
-# ──────────────────────────────────────────────
-
-def _validate_search_in(search_in: str) -> None:
-    """Raise ValueError if any token in search_in is invalid."""
-    tokens = {t.strip() for t in search_in.split(",") if t.strip()}
-    invalid = tokens - VALID_SEARCH_IN
-    if invalid:
-        raise ValueError(
-            f"Invalid search_in value(s): {sorted(invalid)}. "
-            f"Valid options: {sorted(VALID_SEARCH_IN)}"
-        )
-
-
-def _serialise_node(node: Union[Term, BoolNode]) -> str:
-    """
-    Serialise a Term or BoolNode to a GitHub Search query fragment.
-
-    Inner BoolNodes are wrapped in parentheses to preserve operator
-    precedence.  The ``in:`` scope qualifier is NOT appended here —
-    it is added exactly once by ``build_keyword_qualifier()``.
-
-    Args:
-        node: A ``Term`` or ``BoolNode`` from ``parse_boolean_query()``.
-
-    Returns:
-        Query fragment string, e.g. ``'("LLM" OR "GPT")'``.
-    """
-    if isinstance(node, Term):
-        quoted = f'"{node.value}"'
-        return f'NOT {quoted}' if node.negated else quoted
-
-    parts = []
-    for child in node.children:
-        if isinstance(child, BoolNode):
-            parts.append(f"({_serialise_node(child)})")
-        else:
-            parts.append(_serialise_node(child))
-    return f" {node.op} ".join(parts)
-
-
-def build_keyword_qualifier(
-    keywords: Union[list[str], Term, BoolNode],
-    keyword_op: str = "AND",
-    keyword_not: list[str] | None = None,
-    search_in: str = "name,description",
-) -> str:
-    """
-    Build the keyword fragment of a GitHub Search query string.
-
-    Accepts either a plain ``list[str]`` of terms or a pre-parsed
-    ``Term`` / ``BoolNode`` AST node from ``parse_boolean_query()``.
-
-    **List path** — composes terms with a boolean operator, appends
-    ``in:`` scope, and optionally appends NOT exclusion terms.
-
-    **AST path** — serialises the AST directly and appends ``in:`` once.
-    ``keyword_op`` and ``keyword_not`` are ignored (model exclusions as
-    ``Term(negated=True)`` nodes inside the AST).
-
-    Args:
-        keywords:    ``list[str]``, a ``Term``, or a ``BoolNode``.
-        keyword_op:  Connector for list path: ``"AND"`` or ``"OR"``.
-        keyword_not: Exclusion terms for list path.
-        search_in:   Comma-separated scope.  Valid: ``name``, ``description``,
-                     ``readme``.  Default: ``"name,description"``.
-
-    Returns:
-        Keyword fragment ready to append to a GitHub Search query.
-        Returns ``""`` for an empty list.
-
-    Raises:
-        ValueError: If ``keyword_op`` is invalid (list path).
-        ValueError: If any token in ``search_in`` is invalid.
-
-    Examples:
-        >>> build_keyword_qualifier(["LLM"])
-        '"LLM" in:name,description'
-        >>> build_keyword_qualifier(["LLM", "agent"], keyword_op="AND")
-        '"LLM" AND "agent" in:name,description'
-        >>> ast = parse_boolean_query('(LLM OR GPT) AND agent AND NOT benchmark')
-        >>> build_keyword_qualifier(ast)
-        '("LLM" OR "GPT") AND "agent" AND NOT "benchmark" in:name,description'
-    """
-    _validate_search_in(search_in)
-
-    # ── AST path ─────────────────────────────────────────────────────────────
-    if isinstance(keywords, (Term, BoolNode)):
-        body = _serialise_node(keywords)
-        return f"{body} in:{search_in}"
-
-    # ── list[str] path ────────────────────────────────────────────────────────
-    if keyword_not is None:
-        keyword_not = []
-
-    op = keyword_op.strip().upper()
-    if op not in VALID_KEYWORD_OPS:
-        raise ValueError(
-            f"Invalid keyword_op '{keyword_op}'. "
-            f"Valid options: {sorted(VALID_KEYWORD_OPS)}"
-        )
-
-    clean = [kw.strip() for kw in keywords if kw.strip()]
-    if not clean:
-        return ""
-
-    joined = f" {op} ".join(f'"{kw}"' for kw in clean)
-    result = f"{joined} in:{search_in}"
-
-    for term in keyword_not:
-        t = term.strip()
-        if t:
-            result += f' NOT "{t}"'
-
-    return result
-
-
-# ──────────────────────────────────────────────
-# Snapshot helpers
-# ──────────────────────────────────────────────
-def load_snapshots() -> dict:
-    """
-    Load previously saved star counts from disk.
-
-    Returns:
-        dict mapping repo full_name → {"stars": int, "saved_at": ISO string}.
-        Empty dict if the file does not exist or is corrupted.
-    """
-    if not SNAPSHOT_FILE.exists():
-        return {}
-    try:
-        return json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def save_snapshots(repos_by_category: dict) -> None:
-    """
-    Persist current star counts to disk, merging with existing data.
-
-    Args:
-        repos_by_category: output of search_trending_repos() or multi-forge search.
-                           Can contain dicts or ForgeRepo objects.
-    """
-    from forges.base import ForgeRepo
-
-    existing = load_snapshots()
-    now = datetime.now(timezone.utc).isoformat()
-
-    for repos in repos_by_category.values():
-        for repo in repos:
-            if isinstance(repo, ForgeRepo):
-                name = f"{repo.forge}:{repo.full_name}"
-                stars = repo.stars
-            elif isinstance(repo, dict):
-                name = repo["full_name"]
-                stars = repo["stargazers_count"]
-            else:
-                continue
-            existing[name] = {
-                "stars": stars,
-                "saved_at": now,
-            }
-
-    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-    SNAPSHOT_FILE.write_text(
-        json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-
-
-def star_delta(repo: dict, snapshots: dict) -> int | None:
-    """
-    Calculate stars gained since the last snapshot (raw, not time-normalised).
-
-    Args:
-        repo:      repo dict from GitHub API, or ForgeRepo object.
-        snapshots: loaded snapshot data.
-
-    Returns:
-        int delta, or None if no previous snapshot exists.
-
-    Examples:
-        >>> snapshots = {"owner/repo": {"stars": 12400, "saved_at": "..."}}
-        >>> repo = {"full_name": "owner/repo", "stargazers_count": 12542}
-        >>> star_delta(repo, snapshots)
-        142
-    """
-    # Support both dict and ForgeRepo objects
-    from forges.base import ForgeRepo
-    if isinstance(repo, ForgeRepo):
-        name = f"{repo.forge}:{repo.full_name}"
-        stars = repo.stars
-    elif isinstance(repo, dict):
-        name = repo["full_name"]
-        stars = repo["stargazers_count"]
-    else:
-        return None
-
-    prev = snapshots.get(name)
-    if prev is None:
-        return None
-    return stars - prev["stars"]
-
-
-def elapsed_days(snapshots: dict, full_name: str) -> float | None:
-    """
-    Return the number of days elapsed since the snapshot was saved.
-
-    Args:
-        snapshots:  loaded snapshot data.
-        full_name:  repository full name, e.g. ``"owner/repo"``.
-
-    Returns:
-        Elapsed time in fractional days (always > 0), or ``None`` if the
-        repo has no snapshot or ``saved_at`` is missing/unparseable.
-
-    Examples:
-        >>> from datetime import datetime, timezone, timedelta
-        >>> ts = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
-        >>> snaps = {"owner/repo": {"stars": 100, "saved_at": ts}}
-        >>> days = elapsed_days(snaps, "owner/repo")
-        >>> 0.4 < days < 0.6
-        True
-    """
-    entry = snapshots.get(full_name)
-    if entry is None:
-        return None
-    saved_at_raw = entry.get("saved_at")
-    if not saved_at_raw:
-        return None
-    try:
-        saved_dt = datetime.fromisoformat(saved_at_raw)
-        if saved_dt.tzinfo is None:
-            saved_dt = saved_dt.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
-        delta_seconds = (now - saved_dt).total_seconds()
-        return max(delta_seconds / 86400, 1 / 86400)
-    except (ValueError, TypeError):
-        return None
-
-
-def daily_velocity(repo: dict, snapshots: dict) -> float | None:
-    """
-    Compute the time-normalised star growth rate in stars per day.
-
-    Args:
-        repo:      repo dict from GitHub API, or ForgeRepo object.
-        snapshots: loaded snapshot data.
-
-    Returns:
-        Stars per day rounded to one decimal place, or ``None`` on first run.
-
-    Examples:
-        >>> from datetime import datetime, timezone, timedelta
-        >>> ts = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-        >>> snaps = {"owner/repo": {"stars": 12400, "saved_at": ts}}
-        >>> repo = {"full_name": "owner/repo", "stargazers_count": 13100}
-        >>> daily_velocity(repo, snaps)
-        100.0
-    """
-    delta = star_delta(repo, snapshots)
-    if delta is None:
-        return None
-
-    # Support both dict and ForgeRepo objects
-    from forges.base import ForgeRepo
-    if isinstance(repo, ForgeRepo):
-        name = f"{repo.forge}:{repo.full_name}"
-    elif isinstance(repo, dict):
-        name = repo["full_name"]
-    else:
-        return None
-
-    days = elapsed_days(snapshots, name)
-    if days is None:
-        return None
-    return round(delta / days, 1)
-
-
-# ──────────────────────────────────────────────
-# Core search — repositories
-# ──────────────────────────────────────────────
 def search_trending_repos(
     language: str | None = None,
     since_days: int = 1,
@@ -929,76 +120,47 @@ def search_trending_repos(
     """
     Query the GitHub Search API and return top repositories by category.
 
-    Three keyword input modes (mutually exclusive):
-
-    1. ``keyword`` (str)  — single-term legacy path.
-    2. ``keywords`` (list[str])  — multi-term boolean path via
-       ``build_keyword_qualifier()``.
-    3. ``bool_query`` (Term | BoolNode)  — pre-parsed AST path.
-       ``build_keyword_qualifier()`` is called with the AST directly;
-       ``search_in`` is honoured, ``keyword_op``/``keyword_not`` are
-       ignored (model those inside the AST instead).
-
-    Browse mode (no keyword input)
-    ────────────────────────────────
-    - New Today     — created today, >10 stars.
-    - Active Giants — pushed today, >1000 stars.
-
-    Search mode (any keyword input)
-    ─────────────────────────────────
-    - New & Relevant    — created recently, >50 stars.
-    - Active & Relevant — pushed recently, >500 stars.
-
     Args:
-        language:    Language filter (e.g. "python").
-        since_days:  Days to look back (default: 1).
-        top_n:       Max results per category (default: 10).
+        language:    Language filter (e.g. ``"python"``).
+        since_days:  Days to look back.
+        top_n:       Max results per category.
         keyword:     Single keyword string (legacy).
         keywords:    List of keyword terms for boolean search.
         keyword_op:  Connector for ``keywords``: ``"AND"`` or ``"OR"``.
         keyword_not: Exclusion terms for ``keywords`` path.
-        search_in:   Comma-separated search scope.  Valid: ``name``,
-                     ``description``, ``readme``.  Default:
-                     ``"name,description"``.
-        bool_query:  Pre-parsed AST from ``parse_boolean_query()``.  When
-                     provided, ``keyword_op`` and ``keyword_not`` are ignored.
+        search_in:   Comma-separated search scope.
+        bool_query:  Pre-parsed AST from ``parse_boolean_query()``.
 
     Returns:
-        dict: {category_label: [repo_dict, ...]}
+        Mapping of category label to list of raw GitHub repo dicts.
 
     Raises:
         ValueError: If more than one keyword input mode is active.
-        ValueError: If any token in ``search_in`` is invalid.
-        ValueError: If ``keyword_op`` is not ``"AND"`` or ``"OR"``.
-        requests.HTTPError, requests.ConnectionError, requests.Timeout
     """
-    # Guard: at most one keyword mode active
-    active_modes = sum([
-        keyword is not None,
-        bool(keywords),
-        bool_query is not None,
-    ])
+    active_modes = sum(
+        [
+            keyword is not None,
+            bool(keywords),
+            bool_query is not None,
+        ]
+    )
     if active_modes > 1:
         raise ValueError(
             "'keyword', 'keywords', and 'bool_query' are mutually exclusive."
         )
 
     _validate_search_in(search_in)
-
     since_date = (date.today() - timedelta(days=since_days)).isoformat()
 
-    # ── Build keyword qualifier ───────────────────────────────────────────────
     if bool_query is not None:
-        # AST path — search_in honoured, keyword_op/keyword_not ignored
         keyword_qualifier = " " + build_keyword_qualifier(
             bool_query, search_in=search_in
         )
         is_search_mode = True
-
     elif keywords is not None:
-        # Multi-keyword list path
         keyword_qualifier = (
-            " " + build_keyword_qualifier(
+            " "
+            + build_keyword_qualifier(
                 keywords,
                 keyword_op=keyword_op,
                 keyword_not=keyword_not or [],
@@ -1008,9 +170,7 @@ def search_trending_repos(
             else ""
         )
         is_search_mode = bool(keywords)
-
     else:
-        # Legacy single-keyword path
         keyword_qualifier = f' "{keyword}" in:{search_in}' if keyword else ""
         is_search_mode = bool(keyword)
 
@@ -1035,7 +195,12 @@ def search_trending_repos(
         resp = requests.get(
             "https://api.github.com/search/repositories",
             headers=get_headers(),
-            params={"q": query, "sort": "stars", "order": "desc", "per_page": top_n},
+            params={
+                "q": query,
+                "sort": "stars",
+                "order": "desc",
+                "per_page": top_n,
+            },
             timeout=15,
         )
         resp.raise_for_status()
@@ -1047,9 +212,6 @@ def search_trending_repos(
     return results
 
 
-# ──────────────────────────────────────────────
-# Core search — developers
-# ──────────────────────────────────────────────
 def search_trending_developers(
     language: str | None = None,
     since_days: int = 1,
@@ -1058,22 +220,13 @@ def search_trending_developers(
     """
     Query the GitHub Search API and return top active developers.
 
-    Two complementary strategies:
-    - Rising Stars    — accounts created recently with public repos.
-    - Active Veterans — established developers with high follower counts.
-
-    Each developer is enriched with one extra ``/users/{login}`` request.
-
     Args:
-        language:   Language filter.
-        since_days: Days to look back for rising stars (default: 1).
-        top_n:      Max developers to return (default: 10).
+        language:   Optional language qualifier.
+        since_days: Look-back window in days.
+        top_n:      Max developers to return.
 
     Returns:
-        list of enriched user dicts.
-
-    Raises:
-        requests.HTTPError, requests.ConnectionError, requests.Timeout
+        List of enriched GitHub user dicts.
     """
     since_date = (date.today() - timedelta(days=since_days)).isoformat()
     lang_qualifier = f" language:{language}" if language else ""
@@ -1084,7 +237,7 @@ def search_trending_developers(
     ]
 
     seen_logins: set = set()
-    raw_users: list = []
+    raw_users: list[dict] = []
 
     for query in queries:
         if len(raw_users) >= top_n:
@@ -1092,7 +245,12 @@ def search_trending_developers(
         resp = requests.get(
             "https://api.github.com/search/users",
             headers=get_headers(),
-            params={"q": query, "sort": "followers", "order": "desc", "per_page": top_n},
+            params={
+                "q": query,
+                "sort": "followers",
+                "order": "desc",
+                "per_page": top_n,
+            },
             timeout=15,
         )
         resp.raise_for_status()
@@ -1119,891 +277,29 @@ def search_trending_developers(
     return enriched
 
 
-# ──────────────────────────────────────────────
-# Export helpers — repositories
-# ──────────────────────────────────────────────
-def build_export_row(repo: dict, rank: int, category: str, snapshots: dict) -> dict:
-    """
-    Build a flat export record from a repo dict.
-
-    Args:
-        repo:      repo dict from GitHub API.
-        rank:      1-based rank within its category.
-        category:  category label.
-        snapshots: loaded snapshot data.
-
-    Returns:
-        Ordered dict suitable for JSON serialisation or csv.DictWriter.
-    """
-    delta = star_delta(repo, snapshots)
-    velocity = daily_velocity(repo, snapshots)
-    return {
-        "rank":           rank,
-        "category":       category,
-        "full_name":      repo["full_name"],
-        "stars":          repo["stargazers_count"],
-        "star_delta":     delta,
-        "daily_velocity": velocity,
-        "forks":          repo["forks_count"],
-        "language":       repo.get("language") or "",
-        "description":    (repo.get("description") or "").replace("\n", " "),
-        "created_at":     repo["created_at"][:10],
-        "updated_at":     repo["updated_at"][:10],
-        "url":            repo["html_url"],
-    }
-
-
-# ──────────────────────────────────────────────
-# Export helpers — developers
-# ──────────────────────────────────────────────
-def build_dev_export_row(user: dict, rank: int) -> dict:
-    """
-    Build a flat export record from an enriched user dict.
-
-    Args:
-        user: enriched user dict.
-        rank: 1-based display rank.
-
-    Returns:
-        Ordered dict suitable for JSON serialisation or csv.DictWriter.
-    """
-    return {
-        "rank":         rank,
-        "login":        user.get("login") or "",
-        "name":         user.get("name") or "",
-        "company":      (user.get("company") or "").strip().lstrip("@"),
-        "location":     user.get("location") or "",
-        "public_repos": user.get("public_repos") or 0,
-        "followers":    user.get("followers") or 0,
-        "following":    user.get("following") or 0,
-        "url":          user.get("html_url") or "",
-    }
-
-
-def export_json(rows: list[dict]) -> str:
-    """Serialise export rows to a pretty-printed JSON string."""
-    return json.dumps(rows, indent=2, ensure_ascii=False)
-
-
-def export_csv(rows: list[dict], fieldnames: list[str]) -> str:
-    """
-    Serialise export rows to a CSV string (utf-8-sig for Excel compat).
-
-    ``None`` values are written as empty strings.
-    Protects against CSV injection (formula injection).
-    """
-    buf = io.StringIO()
-    writer = csv.DictWriter(
-        buf, fieldnames=fieldnames, lineterminator="\n", extrasaction="ignore"
-    )
-    writer.writeheader()
-
-    # Characters that trigger formula execution in Excel/Sheets
-    dangerous_chars = ("=", "+", "-", "@", "\t", "\r")
-
-    for row in rows:
-        safe_row = {}
-        for k, v in row.items():
-            if v is None:
-                safe_row[k] = ""
-            elif isinstance(v, str) and v.startswith(dangerous_chars):
-                safe_row[k] = f"'{v}"
-            else:
-                safe_row[k] = v
-        writer.writerow(safe_row)
-    return buf.getvalue()
-
-
-def write_output(content: str, output_file: str | None, fmt: str) -> None:
-    """
-    Write export content to a file or stdout.
-
-    Args:
-        content:     String content to write.
-        output_file: File path, or None to write to stdout.
-        fmt:         Format label for the confirmation message.
-    """
-    if output_file:
-        encoding = "utf-8-sig" if fmt == "csv" else "utf-8"
-        Path(output_file).write_text(content, encoding=encoding)
-        print(f"  Exported {fmt.upper()} → {output_file}", file=sys.stderr)
-    else:
-        print(content)
-
-
-# ──────────────────────────────────────────────
-# Text formatting (human-readable, plain-text fallback)
-# ──────────────────────────────────────────────
-def format_velocity(delta: int | None, velocity: float | None = None) -> str:
-    """
-    Render star delta and daily velocity as a human-readable badge.
-
-    Examples:
-        >>> format_velocity(None, None)
-        '  Δ  — (first run — no velocity data yet)'
-        >>> format_velocity(700, 100.0)
-        '  Δ +700 ⭐ total  |  ~100.0 ⭐/day'
-        >>> format_velocity(142)
-        '  Δ +142 ⭐'
-    """
-    if delta is None:
-        return "  Δ  — (first run — no velocity data yet)"
-    sign = "+" if delta > 0 else ""
-    if velocity is None:
-        return f"  Δ {sign}{delta:,} ⭐"
-    return f"  Δ {sign}{delta:,} ⭐ total  |  ~{velocity:,} ⭐/day"
-
-
-def format_repo(repo: dict, rank: int, snapshots: dict) -> str:
-    """Format a single repo dict into a human-readable terminal block."""
-    delta = star_delta(repo, snapshots)
-    velocity = daily_velocity(repo, snapshots)
-    return (
-        f"{'=' * 70}\n"
-        f"#{rank}  {repo['full_name']}\n"
-        f"    Stars: {repo['stargazers_count']:,}  "
-        f"Forks: {repo['forks_count']:,}  "
-        f"Lang: {repo.get('language') or 'N/A'}\n"
-        f"{format_velocity(delta, velocity)}\n"
-        f"    Created: {repo['created_at'][:10]}  |  Updated: {repo['updated_at'][:10]}\n"
-        f"    {(repo.get('description') or 'No description')[:80]}\n"
-        f"    {repo['html_url']}\n"
-    )
-
-
-def format_developer(user: dict, rank: int) -> str:
-    """Format a single enriched user dict into a human-readable terminal block."""
-    name = user.get("name") or user.get("login", "")
-    company = (user.get("company") or "").strip().lstrip("@")
-    location = user.get("location") or "N/A"
-    bio = (user.get("bio") or "No bio")[:80]
-    return (
-        f"{'=' * 70}\n"
-        f"#{rank}  {user.get('login', '')}  ({name})\n"
-        f"    Followers: {user.get('followers', 0):,}  "
-        f"Repos: {user.get('public_repos', 0):,}  "
-        f"Following: {user.get('following', 0):,}\n"
-        f"    Company : {company or 'N/A'}\n"
-        f"    Location: {location}\n"
-        f"    {bio}\n"
-        f"    {user.get('html_url', '')}\n"
-    )
-
-
-# ──────────────────────────────────────────────
-# AI Relevance Filter
-# ──────────────────────────────────────────────
-
-@dataclass
-class AIFilterConfig:
-    """
-    Configuration for the LLM-based relevance filter.
-
-    Attributes:
-        provider:   ``"openai"`` (any OpenAI-compatible endpoint) or
-                    ``"anthropic"`` (native Anthropic SDK).
-        base_url:   Base URL for OpenAI-compatible endpoints.
-                    Ignored when provider is ``"anthropic"``.
-        model:      Model name (e.g. ``"gpt-4o-mini"``, ``"llama3.2"``,
-                    ``"claude-haiku-4-5"``).
-        api_key:    API key.  Use ``"ollama"`` or ``"lm-studio"`` for
-                    local servers that don't require a real key.
-        max_tokens: Max tokens in the LLM response (default: 64 — we only
-                    need yes/no + one sentence).
-        timeout:    HTTP timeout in seconds (default: 30).
-    """
-    provider: str = "openai"
-    base_url: str = "https://api.openai.com/v1"
-    model: str = "gpt-4o-mini"
-    api_key: str = ""
-    max_tokens: int = 64
-    timeout: int = 30
-
-
-def load_ai_filter_config() -> AIFilterConfig | None:
-    """
-    Build an AIFilterConfig from environment variables.
-
-    Reads the following .env keys:
-
-    OpenAI-compatible path (default)::
-
-        AI_PROVIDER=openai            # optional, defaults to openai
-        AI_BASE_URL=https://...       # base URL of the API
-        AI_MODEL=gpt-4o-mini          # model name
-        AI_API_KEY=sk-...             # API key
-
-    Anthropic path::
-
-        AI_PROVIDER=anthropic
-        ANTHROPIC_API_KEY=sk-ant-...
-        ANTHROPIC_MODEL=claude-haiku-4-5
-
-    Returns:
-        ``AIFilterConfig`` if the necessary env vars are present, else ``None``.
-    """
-    provider = os.getenv("AI_PROVIDER", "openai").strip().lower()
-
-    if provider == "anthropic":
-        api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
-        model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5").strip()
-        if not api_key:
-            return None
-        return AIFilterConfig(
-            provider="anthropic",
-            base_url="",  # unused
-            model=model,
-            api_key=api_key,
-        )
-
-    # OpenAI-compatible (default)
-    api_key = os.getenv("AI_API_KEY", "").strip()
-    base_url = os.getenv("AI_BASE_URL", "https://api.openai.com/v1").strip().rstrip("/")
-    model = os.getenv("AI_MODEL", "gpt-4o-mini").strip()
-    if not api_key:
-        return None
-    return AIFilterConfig(
-        provider="openai",
-        base_url=base_url,
-        model=model,
-        api_key=api_key,
-    )
-
-
-def fetch_readme_snippet(full_name: str, max_chars: int = 800) -> str:
-    """
-    Fetch the first ``max_chars`` characters of a repo's README via GitHub API.
-
-    Uses the ``/repos/{owner}/{repo}/readme`` endpoint which returns the
-    preferred README regardless of filename or case.
-
-    Args:
-        full_name: Repository full name, e.g. ``"owner/repo"``.
-        max_chars: Maximum characters to return (default: 800).
-
-    Returns:
-        README snippet string, or ``""`` if unavailable / non-text.
-    """
-    try:
-        resp = requests.get(
-            f"https://api.github.com/repos/{full_name}/readme",
-            headers={**get_headers(), "Accept": "application/vnd.github.raw+json"},
-            timeout=10,
-        )
-        if resp.status_code == 404:
-            return ""
-        resp.raise_for_status()
-        return resp.text[:max_chars]
-    except (requests.RequestException, UnicodeDecodeError):
-        return ""
-
-
-def _call_openai_compatible(
-    config: AIFilterConfig,
-    system_prompt: str,
-    user_message: str,
-) -> str:
-    """
-    Call any OpenAI-compatible chat completions endpoint.
-
-    Args:
-        config:        AIFilterConfig with provider=``"openai"``.
-        system_prompt: System message for the LLM.
-        user_message:  User message containing repo context.
-
-    Returns:
-        Raw text content of the first choice's message.
-
-    Raises:
-        requests.HTTPError: On non-2xx responses.
-        requests.Timeout:   On timeout.
-        ValueError:         If the response is missing the expected fields.
-    """
-    resp = requests.post(
-        f"{config.base_url}/chat/completions",
-        headers={
-            "Authorization": f"Bearer {config.api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": config.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
-            "max_tokens": config.max_tokens,
-            "temperature": 0,
-        },
-        timeout=config.timeout,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    try:
-        return data["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError) as exc:
-        raise ValueError(f"Unexpected LLM response shape: {data}") from exc
-
-
-def _call_anthropic(
-    config: AIFilterConfig,
-    system_prompt: str,
-    user_message: str,
-) -> str:
-    """
-    Call the Anthropic Messages API.
-
-    Requires the ``anthropic`` package: ``pip install anthropic``.
-
-    Args:
-        config:        AIFilterConfig with provider=``"anthropic"``.
-        system_prompt: System message.
-        user_message:  User message containing repo context.
-
-    Returns:
-        Raw text of the first content block.
-
-    Raises:
-        ImportError:  If the ``anthropic`` package is not installed.
-        anthropic.APIError: On API errors.
-    """
-    try:
-        import anthropic as _anthropic  # type: ignore
-    except ImportError as exc:
-        raise ImportError(
-            "The 'anthropic' package is required for AI_PROVIDER=anthropic. "
-            "Install it with: pip install anthropic"
-        ) from exc
-
-    # Security: Set explicit timeout to prevent DoS from hanging connections
-    client = _anthropic.Anthropic(
-        api_key=config.api_key,
-        timeout=config.timeout,
-    )
-    msg = client.messages.create(
-        model=config.model,
-        max_tokens=config.max_tokens,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_message}],
-    )
-    return msg.content[0].text.strip()
-
-
-_RELEVANCE_SYSTEM_PROMPT = (
-    "You are a precise relevance classifier for GitHub repositories. "
-    "Given a user's intent and a repository's description plus README snippet, "
-    "decide if the repository is relevant to the user's intent. "
-    "Reply with exactly one line: start with YES or NO, "
-    "then a colon and a brief reason (max 15 words). "
-    "Example: YES: implements the exact pattern the user described."
-)
-
-
-def repo_identity(repo) -> tuple[str, str]:
-    """
-    Extract ``(full_name, description)`` from a repo payload.
-
-    Accepts either a raw GitHub-style dict or a :class:`~forges.base.ForgeRepo`.
-    Both shapes are produced by search paths in this project.
-
-    Args:
-        repo: Mapping with ``full_name`` / ``description``, or ``ForgeRepo``.
-
-    Returns:
-        ``(full_name, description)``. Description is an empty string when
-        missing or ``None``.
-
-    Raises:
-        ValueError: If the object exposes neither shape.
-
-    Examples:
-        >>> repo_identity({"full_name": "a/b", "description": "hi"})
-        ('a/b', 'hi')
-        >>> repo_identity({"full_name": "a/b"})
-        ('a/b', '')
-    """
-    from forges.base import ForgeRepo
-
-    if isinstance(repo, ForgeRepo):
-        return repo.full_name, (repo.description or "")
-    if isinstance(repo, dict):
-        return repo["full_name"], (repo.get("description") or "")
-    raise ValueError(f"Unsupported repo type for identity: {type(repo)!r}")
-
-
-def is_repo_relevant(
-    repo,
-    query: str,
-    config: AIFilterConfig,
-) -> tuple[bool, str]:
-    """
-    Ask the LLM whether a repository is relevant to ``query``.
-
-    Fetches the README snippet, builds a compact context message, and
-    calls the appropriate LLM backend.
-
-    Args:
-        repo:   Repository dict from GitHub API, or ``ForgeRepo``.
-        query:  Natural-language description of what the user is looking for.
-        config: AIFilterConfig specifying the backend and credentials.
-
-    Returns:
-        ``(relevant: bool, reason: str)``
-        ``relevant`` is ``True`` when the LLM responds with ``YES``.
-        ``reason`` is the LLM's brief explanation.
-    """
-    full_name, description_raw = repo_identity(repo)
-    description = description_raw.strip()
-    readme = fetch_readme_snippet(full_name)
-
-    user_message = (
-        f"User intent: {query}\n\n"
-        f"Repository: {full_name}\n"
-        f"Description: {description or 'N/A'}\n"
-        f"README snippet:\n{readme or 'N/A'}"
-    )
-
-    try:
-        if config.provider == "anthropic":
-            raw = _call_anthropic(config, _RELEVANCE_SYSTEM_PROMPT, user_message)
-        else:
-            raw = _call_openai_compatible(config, _RELEVANCE_SYSTEM_PROMPT, user_message)
-    except Exception as exc:  # noqa: BLE001
-        # Propagate so callers can apply fallback policy
-        raise RuntimeError(f"LLM call failed for {full_name}: {exc}") from exc
-
-    upper = raw.upper()
-    relevant = upper.startswith("YES")
-    reason = raw.split(":", 1)[-1].strip() if ":" in raw else raw
-    return relevant, reason
-
-
-def apply_ai_filter(
-    repos_by_category: dict,
-    query: str,
-    config: AIFilterConfig,
-    fallback: str = "fail",
-    verbose: bool = True,
-) -> dict:
-    """
-    Filter ``repos_by_category`` to only relevant repos using LLM scoring.
-
-    Iterates over every repo in every category, calls ``is_repo_relevant()``,
-    and keeps only those for which the LLM returns ``YES``.
-
-    Args:
-        repos_by_category: Output of ``search_trending_repos()``.
-        query:             Natural-language relevance query.
-        config:            AIFilterConfig.
-        fallback:          ``"fail"`` (default) — raises RuntimeError on LLM
-                           failure. ``"passthrough"`` — warns and returns the
-                           original dict unfiltered.
-        verbose:           Print per-repo progress to stderr (default: True).
-
-    Returns:
-        New dict with same structure as input, containing only relevant repos.
-
-    Raises:
-        RuntimeError: If an LLM call fails and ``fallback`` is ``"fail"``.
-        ValueError:   If ``fallback`` is not ``"fail"`` or ``"passthrough"``.
-    """
-    if fallback not in ("fail", "passthrough"):
-        raise ValueError(
-            f"Invalid fallback '{fallback}'. Valid options: 'fail', 'passthrough'."
-        )
-
-    # Count total repos for progress bar
-    total_repos = sum(len(repos) for repos in repos_by_category.values())
-
-    filtered: dict = {}
-
-    # Use Rich progress bar if available, otherwise fall back to per-repo stderr
-    progress_ctx = make_ai_filter_progress() if (verbose and RICH_AVAILABLE and make_ai_filter_progress) else None
-
-    if progress_ctx is not None:
-        with progress_ctx as progress:
-            task = progress.add_task("AI filtering...", total=total_repos)
-            for category, repos in repos_by_category.items():
-                kept: list[dict] = []
-                for repo in repos:
-                    try:
-                        relevant, reason = is_repo_relevant(repo, query, config)
-                    except RuntimeError as exc:
-                        if fallback == "passthrough":
-                            print(
-                                f"  ⚠  LLM unavailable — showing all results unfiltered.\n"
-                                f"     ({exc})",
-                                file=sys.stderr,
-                            )
-                            return repos_by_category
-                        raise
-
-                    if relevant:
-                        kept.append(repo)
-                    progress.advance(task)
-                filtered[category] = kept
-    else:
-        for category, repos in repos_by_category.items():
-            kept: list[dict] = []
-            for repo in repos:
-                try:
-                    relevant, reason = is_repo_relevant(repo, query, config)
-                except RuntimeError as exc:
-                    if fallback == "passthrough":
-                        print(
-                            f"  ⚠  LLM unavailable — showing all results unfiltered.\n"
-                            f"     ({exc})",
-                            file=sys.stderr,
-                        )
-                        return repos_by_category
-                    raise
-
-                if verbose:
-                    mark = "✓" if relevant else "✗"
-                    full_name, _ = repo_identity(repo)
-                    print(
-                        f"  {mark} {full_name}  — {reason}",
-                        file=sys.stderr,
-                    )
-                if relevant:
-                    kept.append(repo)
-
-            filtered[category] = kept
-
-    return filtered
-
-
-# ──────────────────────────────────────────────
-# CLI helpers
-# ──────────────────────────────────────────────
-
-def _build_arg_parser() -> "argparse.ArgumentParser":
-    """Build and return the CLI argument parser."""
+def _build_arg_parser():
+    """Build the legacy GitHub-only CLI parser."""
     import argparse
 
-    parser = argparse.ArgumentParser(
-        prog="github_repo_of_the_day",
-        description=(
-            "Discover GitHub's top trending repositories and developers — "
-            "with real star velocity, boolean search, wildcard expansion, "
-            "and AI relevance filtering."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
-    )
+    from daily_github_pulse.cli import _build_arg_parser as _pulse_parser
 
-    # ── What to show ──────────────────────────────────────────────────────────
-    parser.add_argument(
-        "--developers", action="store_true",
-        help="Show trending developers instead of repositories.",
-    )
-
-    # ── Time window ───────────────────────────────────────────────────────────
-    parser.add_argument(
-        "-d", "--days", type=int, default=1, metavar="N",
-        help="Look-back window in days (default: 1).  Overridden by --period.",
-    )
-    parser.add_argument(
-        "-p", "--period", choices=list(PERIOD_DAYS), default=None,
-        help="Named look-back period: day, week, month.  Overrides --days.",
-    )
-
-    # ── Filters ───────────────────────────────────────────────────────────────
-    parser.add_argument(
-        "-l", "--language", default=None, metavar="LANG",
-        help="Filter by programming language (e.g. python, rust, go).",
-    )
-    parser.add_argument(
-        "-n", "--top", type=int, default=10, metavar="N",
-        help="Number of results per category (default: 10).",
-    )
-
-    # ── Keyword search ────────────────────────────────────────────────────────
-    parser.add_argument(
-        "-k", "--keyword", default=None, metavar="TERM",
-        help="Single keyword filter (legacy; use --keywords for multiple terms).",
-    )
-    parser.add_argument(
-        "--keywords", nargs="+", default=None, metavar="TERM",
-        help="One or more keyword terms.  Combined with --keyword-op.",
-    )
-    parser.add_argument(
-        "--keyword-op", choices=["AND", "OR"], default="AND",
-        help="Boolean operator for --keywords (default: AND).",
-    )
-    parser.add_argument(
-        "--keyword-not", nargs="+", default=None, metavar="TERM",
-        help="Terms to exclude from --keywords search.",
-    )
-    parser.add_argument(
-        "--search-in",
-        default="name,description",
-        metavar="FIELDS",
-        help=(
-            "Comma-separated fields to search in.  "
-            "Valid: name, description, readme (default: name,description)."
-        ),
-    )
-    parser.add_argument(
-        "--bool-query", default=None, metavar="EXPR",
-        help=(
-            "Boolean keyword expression, e.g. "
-            "'(LLM OR GPT) AND agent AND NOT benchmark'."
-        ),
-    )
-    parser.add_argument(
-        "--wildcard", action="store_true",
-        help=(
-            "Expand ? and * wildcards in --keywords against the NLTK word corpus.  "
-            "Requires: pip install nltk"
-        ),
-    )
-
-    # ── AI filter ─────────────────────────────────────────────────────────────
-    parser.add_argument(
-        "--ai-filter", action="store_true",
-        help="Enable LLM-based relevance filtering.",
-    )
-    parser.add_argument(
-        "--ai-filter-query", default=None, metavar="QUERY",
-        help="Natural-language description of what you're looking for.",
-    )
-    parser.add_argument(
-        "--ai-filter-fallback",
-        choices=["fail", "passthrough"],
-        default="fail",
-        help=(
-            "Behaviour when the LLM is unavailable: "
-            "'fail' (default) exits with error; "
-            "'passthrough' shows all repos unfiltered."
-        ),
-    )
-
-    # ── GitHub token ──────────────────────────────────────────────────────────
-    parser.add_argument(
-        "--token", default=None, metavar="TOKEN",
-        help=(
-            "GitHub personal access token.  "
-            "Overrides GITHUB_TOKEN env var.  "
-            "Raises rate limit from 60 to 5,000 req/hr."
-        ),
-    )
-
-    # ── Output ────────────────────────────────────────────────────────────────
-    parser.add_argument(
-        "-o", "--output", choices=["text", "json", "csv"], default="text",
-        help="Output format (default: text).",
-    )
-    parser.add_argument(
-        "-f", "--output-file", default=None, metavar="PATH",
-        help="Write output to this file instead of stdout.",
-    )
-
-    # ── Snapshot ─────────────────────────────────────────────────────────────
-    parser.add_argument(
-        "--no-snapshot", action="store_true",
-        help="Skip saving star counts for velocity tracking this run.",
-    )
-    parser.add_argument(
-        "--clear-snapshots", action="store_true",
-        help="Delete all stored snapshots and exit.",
-    )
-
-    # ── Version ──────────────────────────────────────────────────────────────
-    parser.add_argument(
-        "--version", action="version", version=f"%(prog)s {VERSION}",
-    )
-
-    return parser
-
-
-# ──────────────────────────────────────────────
-# Entry point
-# ──────────────────────────────────────────────
-
-def _run_developer_mode(args: object, since_days: int) -> None:
-    """Handle the --developers mode: search and render trending developers."""
-    if RICH_AVAILABLE and print_header:
-        print_header(since_days, mode="developers")
-    else:
-        print(
-            f"\n🔍  Trending Developers  "
-            f"(last {since_days} day{'s' if since_days != 1 else ''})\n",
-            file=sys.stderr,
-        )
-    try:
-        developers = search_trending_developers(
-            language=args.language,
-            since_days=since_days,
-            top_n=args.top,
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"Error fetching developers: {exc}", file=sys.stderr)
-        sys.exit(1)
-
-    if args.output == "text":
-        if RICH_AVAILABLE and print_developer_table:
-            print_developer_table(developers)
-        else:
-            for i, user in enumerate(developers, start=1):
-                print(format_developer(user, i))
-    else:
-        rows = [build_dev_export_row(u, i) for i, u in enumerate(developers, start=1)]
-        if args.output == "json":
-            write_output(export_json(rows), args.output_file, "json")
-        else:
-            write_output(
-                export_csv(rows, DEV_EXPORT_FIELDS), args.output_file, "csv"
-            )
-
-
-def _run_repo_mode(args: object, since_days: int, parser: object) -> None:
-    """Handle the repository mode: search, AI filter, render, and save snapshots."""
-    # Boolean query parse
-    bool_query_ast = None
-    if args.bool_query:
-        try:
-            bool_query_ast = parse_boolean_query(args.bool_query)
-        except ValueError as exc:
-            parser.error(str(exc))
-
-    # Wildcard expansion
-    effective_keywords = args.keywords
-    if args.wildcard and effective_keywords:
-        effective_keywords = apply_wildcards_to_keywords(effective_keywords)
-
-    # Repository search
-    if RICH_AVAILABLE and print_header:
-        print_header(since_days, mode="repos")
-    else:
-        print(
-            f"\n🔍  Trending Repositories  "
-            f"(last {since_days} day{'s' if since_days != 1 else ''})\n",
-            file=sys.stderr,
-        )
-    try:
-        repos_by_category = search_trending_repos(
-            language=args.language,
-            since_days=since_days,
-            top_n=args.top,
-            keyword=args.keyword,
-            keywords=effective_keywords,
-            keyword_op=args.keyword_op,
-            keyword_not=args.keyword_not,
-            search_in=args.search_in,
-            bool_query=bool_query_ast,
-        )
-    except ValueError as exc:
-        parser.error(str(exc))
-    except Exception as exc:  # noqa: BLE001
-        print(f"Error fetching repositories: {exc}", file=sys.stderr)
-        sys.exit(1)
-
-    # AI filter
-    if args.ai_filter:
-        ai_query = args.ai_filter_query
-        if not ai_query:
-            parser.error("--ai-filter requires --ai-filter-query.")
-
-        ai_config = load_ai_filter_config()
-        if ai_config is None:
-            if args.ai_filter_fallback == "passthrough":
-                print(
-                    "  ⚠  No AI credentials found — showing all results unfiltered.",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    "  ✗  No AI credentials found.  "
-                    "Set AI_API_KEY (or ANTHROPIC_API_KEY) in .env.\n"
-                    "     Use --ai-filter-fallback=passthrough to skip filtering.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-        else:
-            print(
-                f"  🤖  AI filter active  [{ai_config.provider} / {ai_config.model}]\n"
-                f"      Query: \"{ai_query}\"\n",
-                file=sys.stderr,
-            )
-            try:
-                repos_by_category = apply_ai_filter(
-                    repos_by_category,
-                    query=ai_query,
-                    config=ai_config,
-                    fallback=args.ai_filter_fallback,
-                    verbose=True,
-                )
-            except RuntimeError as exc:
-                print(f"AI filter error: {exc}", file=sys.stderr)
-                sys.exit(1)
-
-    # Load snapshots for velocity
-    snapshots = load_snapshots()
-
-    # Render output
-    if args.output == "text":
-        if RICH_AVAILABLE and print_repo_table:
-            print_repo_table(repos_by_category, snapshots)
-        else:
-            for category, repos in repos_by_category.items():
-                print(f"\n{'─' * 70}")
-                print(f"  {category.upper()}  ({len(repos)} results)")
-                print(f"{'─' * 70}\n")
-                if not repos:
-                    print("  (no results)\n")
-                    continue
-                for i, repo in enumerate(repos, start=1):
-                    print(format_repo(repo, i, snapshots))
-    else:
-        all_rows = []
-        for category, repos in repos_by_category.items():
-            for i, repo in enumerate(repos, start=1):
-                all_rows.append(build_export_row(repo, i, category, snapshots))
-
-        if args.output == "json":
-            write_output(export_json(all_rows), args.output_file, "json")
-        else:
-            write_output(export_csv(all_rows, EXPORT_FIELDS), args.output_file, "csv")
-
-    # Persist snapshots
-    if not getattr(args, "no_snapshot", False):
-        try:
-            save_snapshots(repos_by_category)
-        except OSError as exc:
-            print(f"  ⚠  Could not save snapshots: {exc}", file=sys.stderr)
+    # Reuse the multi-forge parser surface for the legacy entry as well.
+    return _pulse_parser()
 
 
 def main() -> None:
-    """Parse CLI arguments and run the requested search."""
+    """Run the multi-forge CLI (shared implementation)."""
     global GITHUB_TOKEN  # noqa: PLW0603
 
     parser = _build_arg_parser()
     args = parser.parse_args()
-
-    # Clear snapshots and exit
-    if args.clear_snapshots:
-        if SNAPSHOT_FILE.exists():
-            SNAPSHOT_FILE.unlink()
-            print("  ✓  Snapshots cleared.", file=sys.stderr)
-        else:
-            print("  (no snapshots to clear)", file=sys.stderr)
-        return
-
-    # Token override
     if args.token:
         GITHUB_TOKEN = args.token
+        os.environ["GITHUB_TOKEN"] = args.token
 
-    # Resolve look-back window
-    try:
-        since_days = resolve_period(args.period, args.days)
-    except ValueError as exc:
-        parser.error(str(exc))
+    from daily_github_pulse.cli import main as pulse_main
 
-    # Dispatch to the appropriate mode
-    if args.developers:
-        _run_developer_mode(args, since_days)
-    else:
-        _run_repo_mode(args, since_days, parser)
+    pulse_main()
 
 
 if __name__ == "__main__":
