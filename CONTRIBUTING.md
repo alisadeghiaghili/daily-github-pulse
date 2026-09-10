@@ -51,21 +51,19 @@ cd daily-github-pulse
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 
-# 3. Install runtime dependencies
-pip install -r requirements.txt
+# 3. Install the package (editable) with dev extras
+pip install -e ".[rich,dev]"
 
-# 4. Install dev dependencies
-pip install pytest
-
-# 5. Optional: wildcard expansion support
+# 4. Optional: wildcard expansion support
 pip install nltk
 
-# 6. Copy the env template and add your GitHub token
+# 5. Copy the env template and add your GitHub token
 cp .env.example .env
 # Edit .env and set GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxx
 
-# 7. Verify everything works
-python github_repo_of_the_day.py --top 3
+# 6. Verify everything works
+daily-github-pulse --top 3
+python -m daily_github_pulse --version
 ```
 
 ---
@@ -94,26 +92,23 @@ All tests must pass before opening a PR (currently 200+). The CI matrix runs on 
 
 ```
 daily-github-pulse/
-├── daily_github_pulse.py          # Main entry point (multi-forge)
-├── github_repo_of_the_day.py     # Legacy entry point (backward compat)
-├── forges/
-│   ├── __init__.py               # Forge registry + factory
-│   ├── base.py                   # ForgeClient ABC + dataclasses
-│   ├── github.py                 # GitHub implementation
-│   ├── gitlab.py                 # GitLab implementation
-│   ├── gitea.py                  # Gitea/Codeberg implementation
-│   └── bitbucket.py              # Bitbucket implementation
-├── rich_display.py               # Rich terminal output
+├── src/daily_github_pulse/       # Installable package
+│   ├── __init__.py               # VERSION
+│   ├── __main__.py               # python -m daily_github_pulse
+│   ├── cli.py                    # Multi-forge CLI
+│   ├── core/
+│   │   ├── boolean.py            # AST + qualifier builder + wildcards
+│   │   ├── velocity.py           # snapshots + star velocity
+│   │   ├── export.py             # JSON/CSV export
+│   │   └── periods.py            # look-back windows
+│   ├── forges/                   # GitHub, GitLab, Gitea, Bitbucket
+│   ├── ai/filter.py              # LLM relevance filter
+│   └── display/                  # rich + plain formatters
+├── github_repo_of_the_day.py     # Compatibility façade
+├── forges/                       # Re-export shims (compat)
+├── rich_display.py               # Re-export shim (compat)
 ├── tests/
-│   ├── test_github.py            # GitHub forge tests
-│   ├── test_gitlab.py            # GitLab forge tests
-│   ├── test_gitea.py             # Gitea forge tests
-│   ├── test_bitbucket.py         # Bitbucket forge tests
-│   ├── test_github_repo.py       # Legacy module tests
-│   └── test_rich_display.py      # Rich display tests
-├── .github/
-│   └── workflows/
-│       └── tests.yml             # CI workflow
+├── pyproject.toml
 ├── requirements.txt
 ├── .env.example
 ├── CHANGELOG.md
@@ -121,10 +116,8 @@ daily-github-pulse/
 └── README.md
 ```
 
-The project uses a **forge abstraction layer** (`forges/`) that provides a unified
-interface for interacting with GitHub, GitLab, Gitea/Codeberg, and Bitbucket.
-Each forge implements the `ForgeClient` ABC with methods for searching repos
-and developers.
+Core logic lives in `src/daily_github_pulse/`. Root modules named above as
+shims exist so older imports and scripts keep working during the transition.
 
 ---
 

@@ -80,8 +80,8 @@ def tmp_snapshot_file(tmp_path, monkeypatch) -> Path:
     """
     snap_dir = tmp_path / ".daily-github-pulse"
     snap_file = snap_dir / "snapshots.json"
-    monkeypatch.setattr(m, "SNAPSHOT_DIR", snap_dir)
-    monkeypatch.setattr(m, "SNAPSHOT_FILE", snap_file)
+    monkeypatch.setattr("daily_github_pulse.core.velocity.SNAPSHOT_DIR", snap_dir)
+    monkeypatch.setattr("daily_github_pulse.core.velocity.SNAPSHOT_FILE", snap_file)
     return snap_file
 
 

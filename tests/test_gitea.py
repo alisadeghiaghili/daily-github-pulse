@@ -55,7 +55,7 @@ class TestGiteaClient:
     def test_get_token_env_var(self, client):
         assert client.get_token_env_var() == "GITEA_TOKEN"
 
-    @patch("forges.gitea.requests.get")
+    @patch("daily_github_pulse.forges.gitea.requests.get")
     def test_search_repos(self, mock_get, client, sample_repo):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"data": [sample_repo]}
@@ -70,7 +70,7 @@ class TestGiteaClient:
                 assert isinstance(repo, ForgeRepo)
                 assert repo.forge == "gitea"
 
-    @patch("forges.gitea.requests.get")
+    @patch("daily_github_pulse.forges.gitea.requests.get")
     def test_fetch_readme(self, mock_get, client):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -81,7 +81,7 @@ class TestGiteaClient:
         result = client.fetch_readme("owner/repo")
         assert result == "# README"
 
-    @patch("forges.gitea.requests.get")
+    @patch("daily_github_pulse.forges.gitea.requests.get")
     def test_search_developers(self, mock_get, client):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {

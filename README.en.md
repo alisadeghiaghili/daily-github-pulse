@@ -16,10 +16,11 @@ Find out what's blowing up across **GitHub, GitLab, Gitea/Codeberg, and Bitbucke
 `daily-github-pulse` turns trending discovery into a single command:
 
 ```bash
-python daily_github_pulse.py                           # GitHub (default)
-python daily_github_pulse.py --forge gitlab            # GitLab
-python daily_github_pulse.py --forge gitea --gitea-url https://codeberg.org
-python daily_github_pulse.py --forge github,gitlab     # Merged from both
+daily-github-pulse                           # GitHub (default)
+daily-github-pulse --forge gitlab            # GitLab
+daily-github-pulse --forge gitea --gitea-url https://codeberg.org
+daily-github-pulse --forge github,gitlab     # Merged from both
+python -m daily_github_pulse                 # Same CLI via module
 ```
 
 You get a ranked list of repositories that gained the most stars **today**, along with a real daily growth rate — not just a total star count.

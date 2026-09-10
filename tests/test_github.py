@@ -75,7 +75,7 @@ class TestGitHubClient:
     def test_get_token_env_var(self, client):
         assert client.get_token_env_var() == "GITHUB_TOKEN"
 
-    @patch("forges.github.requests.get")
+    @patch("daily_github_pulse.forges.github.requests.get")
     def test_search_repos_browse_mode(self, mock_get, client, sample_repo_data):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"items": [sample_repo_data]}
@@ -87,7 +87,7 @@ class TestGitHubClient:
         assert "New Today" in results or "Active Giants" in results
         assert mock_get.called
 
-    @patch("forges.github.requests.get")
+    @patch("daily_github_pulse.forges.github.requests.get")
     def test_search_repos_returns_forge_repos(self, mock_get, client, sample_repo_data):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"items": [sample_repo_data]}
@@ -101,7 +101,7 @@ class TestGitHubClient:
                 assert isinstance(repo, ForgeRepo)
                 assert repo.forge == "github"
 
-    @patch("forges.github.requests.get")
+    @patch("daily_github_pulse.forges.github.requests.get")
     def test_search_repos_with_language(self, mock_get, client, sample_repo_data):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"items": [sample_repo_data]}
@@ -114,7 +114,7 @@ class TestGitHubClient:
         call_args = mock_get.call_args
         assert "language:python" in call_args[1]["params"]["q"]
 
-    @patch("forges.github.requests.get")
+    @patch("daily_github_pulse.forges.github.requests.get")
     def test_fetch_readme_success(self, mock_get, client):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -125,7 +125,7 @@ class TestGitHubClient:
         result = client.fetch_readme("owner/repo")
         assert result == "# README\nThis is a test."
 
-    @patch("forges.github.requests.get")
+    @patch("daily_github_pulse.forges.github.requests.get")
     def test_fetch_readme_404_returns_empty(self, mock_get, client):
         mock_resp = MagicMock()
         mock_resp.status_code = 404
@@ -134,7 +134,7 @@ class TestGitHubClient:
         result = client.fetch_readme("owner/nonexistent")
         assert result == ""
 
-    @patch("forges.github.requests.get")
+    @patch("daily_github_pulse.forges.github.requests.get")
     def test_search_developers(self, mock_get, client):
         mock_search_resp = MagicMock()
         mock_search_resp.json.return_value = {

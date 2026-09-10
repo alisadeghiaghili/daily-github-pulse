@@ -16,10 +16,16 @@
 `daily-github-pulse` کشف trending را به یک دستور ساده تبدیل می‌کنه:
 
 ```bash
-python daily_github_pulse.py                           # GitHub (پیش‌فرض)
-python daily_github_pulse.py --forge gitlab            # GitLab
-python daily_github_pulse.py --forge gitea --gitea-url https://codeberg.org
-python daily_github_pulse.py --forge github,gitlab     # ترکیب هر دو
+pip install -e ".[rich]"          # نصب پکیج از source
+daily-github-pulse                # GitHub (پیش‌فرض)
+daily-github-pulse --forge gitlab # GitLab
+python -m daily_github_pulse      # همان CLI بدون نصب console script
+```
+
+یا از checkout بدون نصب:
+
+```bash
+PYTHONPATH=src python -m daily_github_pulse --forge github,gitlab
 ```
 
 خروجی: repo‌هایی که **امروز** بیشترین سرعت ستاره‌گیری داشتن، به همراه نرخ رشد روزانه — نه فقط تعداد کل ستاره.
