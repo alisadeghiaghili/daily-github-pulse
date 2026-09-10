@@ -127,7 +127,8 @@ python github_repo_of_the_day.py --keywords LLM --ai-filter --ai-filter-query "i
 | AI | `--ai-filter` | فعال‌سازی فیلتر LLM |
 | AI | `--ai-filter-query "QUERY"` | توضیح هدف به زبان طبیعی |
 | AI | `--ai-filter-fallback passthrough` | رفتار وقتی LLM در دسترس نیست |
-| احراز هویت | `--token TOKEN` | توکن GitHub (جایگزین .env) |
+| احراز هویت | env `GITHUB_TOKEN` | **روش ترجیحی** — توکن در محیط یا `.env` |
+| احراز هویت | `--token TOKEN` | منسوخ (DeprecationWarning) — در process list دیده می‌شود |
 
 </details>
 

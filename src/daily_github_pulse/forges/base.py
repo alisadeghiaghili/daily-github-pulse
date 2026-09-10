@@ -93,6 +93,34 @@ Term = None  # placeholder, resolved at runtime
 BoolNode = None  # placeholder, resolved at runtime
 
 
+def resolve_search_query(
+    query: object | None = None,
+    **legacy_kwargs,
+) -> "SearchQuery":
+    """
+    Resolve a :class:`SearchQuery` from either an object or legacy kwargs.
+
+    Args:
+        query: Optional ``SearchQuery`` instance.
+        **legacy_kwargs: Historical keyword arguments used by older callers.
+
+    Returns:
+        A validated ``SearchQuery``.
+
+    Raises:
+        TypeError: If ``query`` is provided but is not a ``SearchQuery``.
+    """
+    from daily_github_pulse.core.query import SearchQuery
+
+    if query is not None:
+        if not isinstance(query, SearchQuery):
+            raise TypeError(
+                f"query must be SearchQuery, got {type(query).__name__}"
+            )
+        return query.validate()
+    return SearchQuery.from_kwargs(**legacy_kwargs).validate()
+
+
 class ForgeClient(ABC):
     """Abstract base class for forge API clients.
 
@@ -113,6 +141,7 @@ class ForgeClient(ABC):
         keyword_not: list[str] | None = None,
         search_in: str = "name,description",
         bool_query: object | None = None,
+        query: object | None = None,
     ) -> dict[str, list[ForgeRepo]]:
         """Search trending repositories.
 
@@ -129,6 +158,7 @@ class ForgeClient(ABC):
             keyword_not: Terms to exclude.
             search_in:   Comma-separated fields to search.
             bool_query:  Parsed boolean query AST (Term or BoolNode).
+            query:       Preferred ``SearchQuery``; overrides the kwargs above.
         """
         ...
 

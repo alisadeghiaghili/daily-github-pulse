@@ -54,12 +54,9 @@ class TestGitLabClient:
     def test_get_token_env_var(self, client):
         assert client.get_token_env_var() == "GITLAB_TOKEN"
 
-    @patch("daily_github_pulse.forges.gitlab.requests.get")
+    @patch("daily_github_pulse.forges.gitlab.get_json")
     def test_search_repos(self, mock_get, client, sample_project):
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = [sample_project]
-        mock_resp.raise_for_status.return_value = None
-        mock_get.return_value = mock_resp
+        mock_get.return_value = [sample_project]
 
         results = client.search_repos(since_days=1, top_n=5)
 
@@ -69,12 +66,9 @@ class TestGitLabClient:
                 assert isinstance(repo, ForgeRepo)
                 assert repo.forge == "gitlab"
 
-    @patch("daily_github_pulse.forges.gitlab.requests.get")
+    @patch("daily_github_pulse.forges.gitlab.get_json")
     def test_search_repos_empty(self, mock_get, client):
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = []
-        mock_resp.raise_for_status.return_value = None
-        mock_get.return_value = mock_resp
+        mock_get.return_value = []
 
         results = client.search_repos(since_days=1, top_n=5)
         assert results == {}

@@ -14,7 +14,10 @@ from typing import Union
 
 import requests
 
-from .base import ForgeClient, ForgeRepo, ForgeUser
+from daily_github_pulse.core.http import get_json, open_session
+from daily_github_pulse.core.query import SearchQuery
+
+from .base import ForgeClient, ForgeRepo, ForgeUser, resolve_search_query
 from . import register_forge
 
 
@@ -45,6 +48,14 @@ class GitHubClient(ForgeClient):
         """
         self.token = token or os.getenv("GITHUB_TOKEN")
 
+    def _session(self) -> requests.Session:
+        """Build a session with GitHub Accept/Auth headers."""
+        return open_session(
+            self.token,
+            extra_headers={"Accept": "application/vnd.github+json"},
+            bearer=True,
+        )
+
     def _build_qualifier(
         self,
         keyword: str | None = None,
@@ -56,35 +67,25 @@ class GitHubClient(ForgeClient):
     ) -> tuple[str, bool]:
         """Build keyword qualifier and determine if in search mode.
 
-        Returns (qualifier_string, is_search_mode).
+        Returns ``(qualifier_string, is_search_mode)``.
         """
-        from daily_github_pulse.core.boolean import (
-            BoolNode,
-            Term,
-            build_keyword_qualifier,
-        )
+        from daily_github_pulse.core.boolean import build_keyword_qualifier
 
         if bool_query is not None:
-            qualifier = " " + build_keyword_qualifier(
-                bool_query, search_in=search_in
-            )
-            return qualifier, True
+            return " " + build_keyword_qualifier(bool_query, search_in=search_in), True
 
         if keywords is not None:
             if keywords:
-                qualifier = (
-                    " " + build_keyword_qualifier(
-                        keywords,
-                        keyword_op=keyword_op,
-                        keyword_not=keyword_not or [],
-                        search_in=search_in,
-                    )
+                qualifier = " " + build_keyword_qualifier(
+                    keywords,
+                    keyword_op=keyword_op,
+                    keyword_not=keyword_not or [],
+                    search_in=search_in,
                 )
             else:
                 qualifier = ""
             return qualifier, bool(keywords)
 
-        # Legacy single keyword
         if keyword:
             return f' "{keyword}" in:{search_in}', True
         return "", False
@@ -100,9 +101,14 @@ class GitHubClient(ForgeClient):
         keyword_not: list[str] | None = None,
         search_in: str = "name,description",
         bool_query: object | None = None,
+        query: SearchQuery | None = None,
     ) -> dict[str, list[ForgeRepo]]:
         """Search trending repositories on GitHub."""
-        qualifier, is_search_mode = self._build_qualifier(
+        q = resolve_search_query(
+            query,
+            language=language,
+            since_days=since_days,
+            top_n=top_n,
             keyword=keyword,
             keywords=keywords,
             keyword_op=keyword_op,
@@ -110,8 +116,16 @@ class GitHubClient(ForgeClient):
             search_in=search_in,
             bool_query=bool_query,
         )
+        qualifier, is_search_mode = self._build_qualifier(
+            keyword=q.keyword,
+            keywords=list(q.keywords) if q.keywords is not None else None,
+            keyword_op=q.keyword_op,
+            keyword_not=list(q.keyword_not) if q.keyword_not is not None else None,
+            search_in=q.search_in,
+            bool_query=q.bool_query,
+        )
 
-        since_date = (date.today() - timedelta(days=since_days)).isoformat()
+        since_date = q.since_date
 
         if is_search_mode:
             queries = {
@@ -124,40 +138,47 @@ class GitHubClient(ForgeClient):
                 "Active Giants": f"pushed:>={since_date} stars:>1000",
             }
 
-        if language:
-            queries = {k: v + f" language:{language}" for k, v in queries.items()}
+        if q.language:
+            queries = {k: v + f" language:{q.language}" for k, v in queries.items()}
 
         results: dict[str, list[ForgeRepo]] = {}
         seen_ids: set = set()
+        session = self._session()
 
-        for label, query in queries.items():
-            resp = requests.get(
-                f"{self.BASE_URL}/search/repositories",
-                headers=_get_headers(self.token),
-                params={"q": query, "sort": "stars", "order": "desc", "per_page": top_n},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            items = resp.json().get("items", [])
+        try:
+            for label, query_string in queries.items():
+                payload = get_json(
+                    session,
+                    f"{self.BASE_URL}/search/repositories",
+                    params={
+                        "q": query_string,
+                        "sort": "stars",
+                        "order": "desc",
+                        "per_page": q.top_n,
+                    },
+                )
+                items = payload.get("items", [])
 
-            repos = []
-            for r in items:
-                if r["id"] in seen_ids:
-                    continue
-                seen_ids.add(r["id"])
-                repos.append(ForgeRepo(
-                    forge="github",
-                    id=str(r["id"]),
-                    full_name=r["full_name"],
-                    stars=r.get("stargazers_count", 0),
-                    forks=r.get("forks_count", 0),
-                    language=r.get("language"),
-                    description=r.get("description"),
-                    created_at=r.get("created_at", ""),
-                    updated_at=r.get("updated_at", ""),
-                    url=r.get("html_url", ""),
-                ))
-            results[label] = repos
+                repos = []
+                for r in items:
+                    if r["id"] in seen_ids:
+                        continue
+                    seen_ids.add(r["id"])
+                    repos.append(ForgeRepo(
+                        forge="github",
+                        id=str(r["id"]),
+                        full_name=r["full_name"],
+                        stars=r.get("stargazers_count", 0),
+                        forks=r.get("forks_count", 0),
+                        language=r.get("language"),
+                        description=r.get("description"),
+                        created_at=r.get("created_at", ""),
+                        updated_at=r.get("updated_at", ""),
+                        url=r.get("html_url", ""),
+                    ))
+                results[label] = repos
+        finally:
+            session.close()
 
         return results
 

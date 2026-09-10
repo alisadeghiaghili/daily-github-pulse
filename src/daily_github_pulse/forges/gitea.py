@@ -13,7 +13,10 @@ from datetime import date, timedelta, timezone
 
 import requests
 
-from .base import ForgeClient, ForgeRepo, ForgeUser
+from daily_github_pulse.core.http import RateLimitError, get_json, open_session
+from daily_github_pulse.core.query import SearchQuery
+
+from .base import ForgeClient, ForgeRepo, ForgeUser, resolve_search_query
 from . import register_forge
 
 
@@ -43,6 +46,9 @@ class GiteaClient(ForgeClient):
             headers["Authorization"] = f"token {self.token}"
         return headers
 
+    def _session(self) -> requests.Session:
+        return open_session(None, extra_headers=self._get_headers(), bearer=False)
+
     def search_repos(
         self,
         language: str | None = None,
@@ -54,44 +60,55 @@ class GiteaClient(ForgeClient):
         keyword_not: list[str] | None = None,
         search_in: str = "name,description",
         bool_query: object | None = None,
+        query: SearchQuery | None = None,
     ) -> dict[str, list[ForgeRepo]]:
         """Search trending repositories on Gitea/Codeberg."""
-        # Gitea search API
+        q = resolve_search_query(
+            query,
+            language=language,
+            since_days=since_days,
+            top_n=top_n,
+            keyword=keyword,
+            keywords=keywords,
+            keyword_op=keyword_op,
+            keyword_not=keyword_not,
+            search_in=search_in,
+            bool_query=bool_query,
+        )
+
         search_terms = []
-        if keyword:
-            search_terms.append(keyword)
-        elif keywords:
-            search_terms.extend(keywords)
+        if q.keyword:
+            search_terms.append(q.keyword)
+        elif q.keywords:
+            search_terms.extend(q.keywords)
 
         params = {
             "sort": "stars",
             "order": "desc",
-            "limit": min(top_n * 2, 50),
+            "limit": min(q.top_n * 2, 50),
         }
         if search_terms:
             params["q"] = " ".join(search_terms)
-        if language:
-            params["q"] = f"{params.get('q', '')} language:{language}".strip()
+        if q.language:
+            params["q"] = f"{params.get('q', '')} language:{q.language}".strip()
 
+        session = self._session()
         try:
-            resp = requests.get(
-                f"{self.base_url}/repos/search",
-                headers=self._get_headers(),
-                params=params,
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            data = get_json(session, f"{self.base_url}/repos/search", params=params)
             repos_data = data.get("data", []) if isinstance(data, dict) else data
-        except requests.RequestException:
+        except RateLimitError:
+            raise
+        except Exception:
             return {}
+        finally:
+            session.close()
 
         # Categorize: new vs active
-        since_date = (date.today() - timedelta(days=since_days)).isoformat()
+        since_date = q.since_date
         new_repos = []
         active_repos = []
 
-        for r in repos_data[:top_n * 2]:
+        for r in repos_data[: q.top_n * 2]:
             repo = ForgeRepo(
                 forge="gitea",
                 id=str(r.get("id", "")),
@@ -113,15 +130,15 @@ class GiteaClient(ForgeClient):
 
         results = {}
         if new_repos:
-            results["New & Relevant"] = new_repos[:top_n]
+            results["New & Relevant"] = new_repos[: q.top_n]
         if active_repos:
-            results["Active & Relevant"] = active_repos[:top_n]
+            results["Active & Relevant"] = active_repos[: q.top_n]
 
         # If no categories populated, use a single category
         if not results:
             all_repos = new_repos + active_repos
             if all_repos:
-                results["Trending Repositories"] = all_repos[:top_n]
+                results["Trending Repositories"] = all_repos[: q.top_n]
 
         return results
 

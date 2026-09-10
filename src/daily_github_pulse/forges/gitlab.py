@@ -12,7 +12,10 @@ from datetime import date, timedelta, timezone
 
 import requests
 
-from .base import ForgeClient, ForgeRepo, ForgeUser
+from daily_github_pulse.core.http import RateLimitError, get_json, open_session
+from daily_github_pulse.core.query import SearchQuery
+
+from .base import ForgeClient, ForgeRepo, ForgeUser, resolve_search_query
 from . import register_forge
 
 
@@ -42,6 +45,13 @@ class GitLabClient(ForgeClient):
             headers["PRIVATE-TOKEN"] = self.token
         return headers
 
+    def _session(self) -> requests.Session:
+        return open_session(
+            None,
+            extra_headers=self._get_headers(),
+            bearer=False,
+        )
+
     def search_repos(
         self,
         language: str | None = None,
@@ -53,69 +63,75 @@ class GitLabClient(ForgeClient):
         keyword_not: list[str] | None = None,
         search_in: str = "name,description",
         bool_query: object | None = None,
+        query: SearchQuery | None = None,
     ) -> dict[str, list[ForgeRepo]]:
         """Search trending projects on GitLab.
 
         GitLab doesn't have a native "trending" endpoint, so we search
         projects sorted by stars, filtered by recent activity.
         """
-        since_date = (date.today() - timedelta(days=since_days)).isoformat()
+        q = resolve_search_query(
+            query,
+            language=language,
+            since_days=since_days,
+            top_n=top_n,
+            keyword=keyword,
+            keywords=keywords,
+            keyword_op=keyword_op,
+            keyword_not=keyword_not,
+            search_in=search_in,
+            bool_query=bool_query,
+        )
+        since_date = q.since_date
 
-        # Build search query
         search_terms = []
-        if keyword:
-            search_terms.append(keyword)
-        elif keywords:
-            search_terms.extend(keywords)
+        if q.keyword:
+            search_terms.append(q.keyword)
+        elif q.keywords:
+            search_terms.extend(q.keywords)
 
         search_query = " ".join(search_terms) if search_terms else ""
 
-        # GitLab project search params
         params = {
             "order_by": "last_activity_at",
             "sort": "desc",
-            "per_page": min(top_n * 2, 100),
+            "per_page": min(q.top_n * 2, 100),
             "updated_after": f"{since_date}T00:00:00Z",
         }
         if search_query:
             params["search"] = search_query
-        # GitLab /projects has no language filter; fold it into search terms
-        # so results stay language-scoped instead of using an unrelated topic tag.
-        if language:
-            lang_term = language.lower()
+        if q.language:
+            lang_term = q.language.lower()
             params["search"] = f"{params.get('search', '')} {lang_term}".strip()
 
+        session = self._session()
         try:
-            resp = requests.get(
-                f"{self.base_url}/projects",
-                headers=self._get_headers(),
-                params=params,
-                timeout=15,
-            )
-            resp.raise_for_status()
-            projects = resp.json()
-        except requests.RequestException:
+            projects = get_json(session, f"{self.base_url}/projects", params=params)
+        except RateLimitError:
+            raise
+        except Exception:
             return {}
+        finally:
+            session.close()
 
         # Categorize results
         new_repos = []
         active_repos = []
 
-        for p in projects[:top_n]:
+        for p in projects[: q.top_n]:
             repo = ForgeRepo(
                 forge="gitlab",
                 id=str(p.get("id", "")),
                 full_name=p.get("path_with_namespace", ""),
                 stars=p.get("star_count", 0),
                 forks=p.get("forks_count", 0),
-                language=None,  # GitLab API doesn't directly expose language in list
+                language=None,
                 description=p.get("description"),
                 created_at=p.get("created_at", ""),
                 updated_at=p.get("last_activity_at", ""),
                 url=p.get("web_url", ""),
             )
 
-            # Simple categorization based on creation date
             created = p.get("created_at", "")
             if created >= since_date:
                 new_repos.append(repo)
@@ -124,9 +140,9 @@ class GitLabClient(ForgeClient):
 
         results = {}
         if new_repos:
-            results["New & Relevant"] = new_repos[:top_n]
+            results["New & Relevant"] = new_repos[: q.top_n]
         if active_repos:
-            results["Active & Relevant"] = active_repos[:top_n]
+            results["Active & Relevant"] = active_repos[: q.top_n]
 
         return results
 
