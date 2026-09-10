@@ -281,7 +281,7 @@ pip install pytest
 pytest tests/ -v
 ```
 
-221 Tests — kein Internetzugang erforderlich (alle APIs vollständig gemockt).
+234 Tests — kein Internetzugang erforderlich (alle APIs vollständig gemockt).
 
 ---
 

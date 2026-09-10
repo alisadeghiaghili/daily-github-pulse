@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [3.0.1] — 2026-07-26
+
+### Fixed
+- `daily_github_pulse.py` now binds `VERSION` after importing the legacy module (`--version` and argparse construction no longer raise `NameError`)
+- Multi-forge plain-text display and JSON/CSV export compute Δ stars and daily velocity using `forge:full_name` snapshot keys (was silently always empty)
+- AI relevance filter accepts both GitHub dict payloads and `ForgeRepo` objects via `repo_identity()`
+- CI coverage now includes `daily_github_pulse`, `rich_display`, and `forges`
+
+### Added
+- `tests/test_stage0_stability.py` — regression tests for version binding, forge velocity keys, and AI filter adapters
+- `repo_identity()` helper for dual-shape repo payloads
+
+---
+
 ## [3.0.0] — 2026-07-24
 
 ### Added

@@ -83,10 +83,10 @@ pytest tests/ -v -k TestParseBooleanQuery
 
 # Run with coverage (requires pytest-cov)
 pip install pytest-cov
-pytest tests/ --cov=github_repo_of_the_day --cov-report=term-missing
+pytest tests/ --cov=github_repo_of_the_day --cov=daily_github_pulse --cov=forges --cov-report=term-missing
 ```
 
-All 136 tests must pass before opening a PR. The CI matrix runs on Python 3.9–3.14.
+All tests must pass before opening a PR (currently 200+). The CI matrix runs on Python 3.9–3.14.
 
 ---
 
