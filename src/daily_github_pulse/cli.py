@@ -347,22 +347,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--token",
         default=None,
         metavar="TOKEN",
-        help=(
-            "Deprecated. Prefer GITHUB_TOKEN in the environment "
-            "(avoids leaking tokens via process listings)."
-        ),
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--gitlab-token",
         default=None,
         metavar="TOKEN",
-        help="Deprecated. Prefer GITLAB_TOKEN in the environment.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--gitea-token",
         default=None,
         metavar="TOKEN",
-        help="Deprecated. Prefer GITEA_TOKEN in the environment.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "-o",
@@ -419,25 +416,22 @@ def main() -> None:
         parser.error("--forge requires at least one forge name.")
 
     if args.token and "github" in forge_names:
-        warnings.warn(
-            "--token is deprecated and may leak via process listings; "
+        print(
+            "WARNING: --token is deprecated and may leak via process listings; "
             "set GITHUB_TOKEN in the environment instead",
-            DeprecationWarning,
-            stacklevel=2,
+            file=sys.stderr,
         )
         os.environ["GITHUB_TOKEN"] = args.token
     if args.gitlab_token:
-        warnings.warn(
-            "--gitlab-token is deprecated; set GITLAB_TOKEN in the environment",
-            DeprecationWarning,
-            stacklevel=2,
+        print(
+            "WARNING: --gitlab-token is deprecated; set GITLAB_TOKEN in the environment",
+            file=sys.stderr,
         )
         os.environ["GITLAB_TOKEN"] = args.gitlab_token
     if args.gitea_token:
-        warnings.warn(
-            "--gitea-token is deprecated; set GITEA_TOKEN in the environment",
-            DeprecationWarning,
-            stacklevel=2,
+        print(
+            "WARNING: --gitea-token is deprecated; set GITEA_TOKEN in the environment",
+            file=sys.stderr,
         )
         os.environ["GITEA_TOKEN"] = args.gitea_token
 
