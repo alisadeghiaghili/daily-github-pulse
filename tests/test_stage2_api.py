@@ -174,22 +174,23 @@ class TestSnapshotPrune:
 
 
 class TestCliTokenDeprecation:
-    def test_token_flag_warns_and_sets_env(self, monkeypatch):
+    def test_token_flag_warns_and_sets_env(self, monkeypatch, capsys):
         from daily_github_pulse import cli
 
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            # simulate the deprecation path used in main()
-            token = "ghp_secret"
-            if token:
-                warnings.warn(
-                    "--token is deprecated; set GITHUB_TOKEN in the environment",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-                monkeypatch.setenv("GITHUB_TOKEN", token)
-        assert any(issubclass(w.category, DeprecationWarning) for w in caught)
+
+        # simulate the deprecation path used in main()
+        token = "ghp_secret"
+        if token:
+            print(
+                "WARNING: --token is deprecated and may leak via process listings; "
+                "set GITHUB_TOKEN in the environment instead.",
+                file=sys.stderr,
+            )
+            monkeypatch.setenv("GITHUB_TOKEN", token)
+
+        captured = capsys.readouterr()
+        assert "WARNING: --token is deprecated" in captured.err
         assert cli.os.environ.get("GITHUB_TOKEN") == "ghp_secret"
 
 
