@@ -347,22 +347,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--token",
         default=None,
         metavar="TOKEN",
-        help=(
-            "Deprecated. Prefer GITHUB_TOKEN in the environment "
-            "(avoids leaking tokens via process listings)."
-        ),
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--gitlab-token",
         default=None,
         metavar="TOKEN",
-        help="Deprecated. Prefer GITLAB_TOKEN in the environment.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--gitea-token",
         default=None,
         metavar="TOKEN",
-        help="Deprecated. Prefer GITEA_TOKEN in the environment.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "-o",
